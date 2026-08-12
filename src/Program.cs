@@ -69,37 +69,76 @@ namespace SapiXiaoai
         private readonly object sync = new object();
         private int generation;
         private IntPtr targetWindow;
+        private uint targetThreadId;
+        private uint targetProcessId;
 
         public int BeginDiscovery()
         {
             lock (sync)
             {
-                targetWindow = IntPtr.Zero;
+                ClearTarget();
                 return ++generation;
             }
         }
 
-        public bool TryAttach(int discoveryGeneration, IntPtr hwnd)
+        public bool TryAttach(int discoveryGeneration, IntPtr hwnd,
+            uint threadId, uint processId)
         {
             lock (sync)
             {
-                if (discoveryGeneration != generation) return false;
+                if (discoveryGeneration != generation || hwnd == IntPtr.Zero ||
+                    threadId == 0 || processId == 0) return false;
                 targetWindow = hwnd;
+                targetThreadId = threadId;
+                targetProcessId = processId;
                 return true;
             }
         }
 
-        public bool IsTarget(IntPtr hwnd)
-        {
-            lock (sync) return hwnd != IntPtr.Zero && hwnd == targetWindow;
-        }
-
-        public void ClearTarget(IntPtr hwnd)
+        public bool TryGetTarget(IntPtr hwnd, out int discoveryGeneration,
+            out uint threadId, out uint processId)
         {
             lock (sync)
             {
-                if (hwnd == targetWindow) targetWindow = IntPtr.Zero;
+                if (hwnd != IntPtr.Zero && hwnd == targetWindow)
+                {
+                    discoveryGeneration = generation;
+                    threadId = targetThreadId;
+                    processId = targetProcessId;
+                    return true;
+                }
+                discoveryGeneration = 0;
+                threadId = 0;
+                processId = 0;
+                return false;
             }
+        }
+
+        public bool TryUseTarget(int discoveryGeneration, IntPtr hwnd,
+            uint threadId, uint processId, Func<bool> action)
+        {
+            lock (sync)
+            {
+                if (!IsTarget(discoveryGeneration, hwnd, threadId, processId)) return false;
+                bool succeeded = action();
+                if (!succeeded && IsTarget(discoveryGeneration, hwnd, threadId, processId))
+                    ClearTarget();
+                return succeeded;
+            }
+        }
+
+        private bool IsTarget(int discoveryGeneration, IntPtr hwnd,
+            uint threadId, uint processId)
+        {
+            return discoveryGeneration == generation && hwnd != IntPtr.Zero &&
+                hwnd == targetWindow && threadId == targetThreadId && processId == targetProcessId;
+        }
+
+        private void ClearTarget()
+        {
+            targetWindow = IntPtr.Zero;
+            targetThreadId = 0;
+            targetProcessId = 0;
         }
     }
 
@@ -127,6 +166,8 @@ namespace SapiXiaoai
         private static extern int GetClassName(IntPtr hwnd, StringBuilder className, int maximumCount);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         private static extern int GetWindowText(IntPtr hwnd, StringBuilder windowName, int maximumCount);
+        [DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
         [DllImport("user32.dll")]
         private static extern bool GetWindowRect(IntPtr hwnd, out NativeRect rect);
         [DllImport("user32.dll")]
@@ -168,9 +209,12 @@ namespace SapiXiaoai
             for (int i = 0; i < 50; i++)
             {
                 IntPtr hwnd = FindWindow("ApplicationFrameWindow", "小爱同学");
-                if (hwnd != IntPtr.Zero && IsExpectedWindow(hwnd))
+                uint processId;
+                uint threadId = GetWindowThreadProcessId(hwnd, out processId);
+                if (threadId != 0 && IsExpectedWindow(hwnd))
                 {
-                    if (state.TryAttach(generation, hwnd)) MoveIfNeeded(hwnd);
+                    if (state.TryAttach(generation, hwnd, threadId, processId))
+                        MoveIfNeeded(generation, hwnd, threadId, processId);
                     return;
                 }
                 Thread.Sleep(100);
@@ -190,21 +234,30 @@ namespace SapiXiaoai
         private static void OnWindowEvent(IntPtr ignored, uint eventType, IntPtr hwnd,
             int idObject, int idChild, uint eventThread, uint eventTime)
         {
-            if (idObject == ObjIdWindow && state.IsTarget(hwnd)) MoveIfNeeded(hwnd);
+            int generation;
+            uint threadId;
+            uint processId;
+            if (idObject == ObjIdWindow &&
+                state.TryGetTarget(hwnd, out generation, out threadId, out processId))
+                MoveIfNeeded(generation, hwnd, threadId, processId);
         }
 
-        private static void MoveIfNeeded(IntPtr hwnd)
+        private static void MoveIfNeeded(int generation, IntPtr hwnd,
+            uint threadId, uint processId)
         {
-            if (!state.IsTarget(hwnd)) return;
-            if (!IsExpectedWindow(hwnd)) { state.ClearTarget(hwnd); return; }
-            NativeRect rect;
-            if (!GetWindowRect(hwnd, out rect)) { state.ClearTarget(hwnd); return; }
-            Point target = CalculatePosition(Screen.PrimaryScreen.WorkingArea,
-                new Size(rect.Right - rect.Left, rect.Bottom - rect.Top));
-            if (rect.Left == target.X && rect.Top == target.Y) return;
-            if (!state.IsTarget(hwnd)) return;
-            SetWindowPos(hwnd, IntPtr.Zero, target.X, target.Y, 0, 0,
-                SwpNoSize | SwpNoZOrder | SwpNoActivate);
+            state.TryUseTarget(generation, hwnd, threadId, processId, delegate
+            {
+                uint currentProcessId;
+                if (GetWindowThreadProcessId(hwnd, out currentProcessId) != threadId ||
+                    currentProcessId != processId || !IsExpectedWindow(hwnd)) return false;
+                NativeRect rect;
+                if (!GetWindowRect(hwnd, out rect)) return false;
+                Point target = CalculatePosition(Screen.PrimaryScreen.WorkingArea,
+                    new Size(rect.Right - rect.Left, rect.Bottom - rect.Top));
+                if (rect.Left == target.X && rect.Top == target.Y) return true;
+                return SetWindowPos(hwnd, IntPtr.Zero, target.X, target.Y, 0, 0,
+                    SwpNoSize | SwpNoZOrder | SwpNoActivate);
+            });
         }
     }
 

@@ -59,14 +59,47 @@ internal static class ProgramTests
         WindowAnchorState anchorState = new WindowAnchorState();
         int staleDiscovery = anchorState.BeginDiscovery();
         int currentDiscovery = anchorState.BeginDiscovery();
-        Check(!anchorState.TryAttach(staleDiscovery, new IntPtr(1)),
+        Check(!anchorState.TryAttach(staleDiscovery, new IntPtr(1), 11, 101),
             "superseded discovery cannot attach stale result");
-        Check(anchorState.TryAttach(currentDiscovery, new IntPtr(2)) &&
-            anchorState.IsTarget(new IntPtr(2)), "current discovery attaches result");
-        anchorState.ClearTarget(new IntPtr(1));
-        Check(anchorState.IsTarget(new IntPtr(2)), "stale clear preserves current target");
-        anchorState.BeginDiscovery();
-        Check(!anchorState.IsTarget(new IntPtr(2)), "new discovery clears prior target");
+        Check(anchorState.TryAttach(currentDiscovery, new IntPtr(2), 22, 202),
+            "current discovery attaches result");
+
+        WindowAnchorState coordinatedState = new WindowAnchorState();
+        int useGeneration = coordinatedState.BeginDiscovery();
+        coordinatedState.TryAttach(useGeneration, new IntPtr(10), 110, 1010);
+        int actionCount = 0;
+        Check(coordinatedState.TryUseTarget(useGeneration, new IntPtr(10), 110, 1010, delegate
+        {
+            actionCount++;
+            return true;
+        }) && actionCount == 1, "current generation action executes");
+
+        int replacementGeneration = coordinatedState.BeginDiscovery();
+        coordinatedState.TryAttach(replacementGeneration, new IntPtr(20), 220, 2020);
+        actionCount = 0;
+        Check(!coordinatedState.TryUseTarget(useGeneration, new IntPtr(10), 110, 1010, delegate
+        {
+            actionCount++;
+            return true;
+        }) && actionCount == 0, "superseded generation action does not execute");
+
+        Check(!coordinatedState.TryUseTarget(replacementGeneration, new IntPtr(20), 220, 2020,
+            delegate { return false; }) &&
+            !coordinatedState.TryUseTarget(replacementGeneration, new IntPtr(20), 220, 2020,
+                delegate { actionCount++; return true; }) && actionCount == 0,
+            "failed current action clears its target");
+
+        int oldGeneration = coordinatedState.BeginDiscovery();
+        coordinatedState.TryAttach(oldGeneration, new IntPtr(30), 330, 3030);
+        int newerGeneration = 0;
+        Check(!coordinatedState.TryUseTarget(oldGeneration, new IntPtr(30), 330, 3030, delegate
+        {
+            newerGeneration = coordinatedState.BeginDiscovery();
+            coordinatedState.TryAttach(newerGeneration, new IntPtr(40), 440, 4040);
+            return false;
+        }) && coordinatedState.TryUseTarget(newerGeneration, new IntPtr(40), 440, 4040,
+            delegate { return true; }),
+            "failed old action preserves newer target");
         return 0;
     }
 }
