@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Speech.Recognition;
 using SapiXiaoai;
 
 internal static class ProgramTests
@@ -36,6 +37,15 @@ internal static class ProgramTests
         Check(!gate.TryEnter(0.99f, start.AddSeconds(4), defaults), "cooldown rejected");
         Check(gate.TryEnter(0.99f, start.AddSeconds(5), defaults), "cooldown elapsed");
         Check(RecognizerSupport.HasZhCnRecognizer(), "zh-CN recognizer installed");
+        RecognizerInfo info = RecognizerSupport.GetZhCnRecognizer();
+        Check(info != null, "zh-CN recognizer selected");
+        using (SpeechRecognitionEngine engine = new SpeechRecognitionEngine(info))
+        {
+            GrammarBuilder builder = new GrammarBuilder("你好小爱");
+            builder.Culture = info.Culture;
+            engine.LoadGrammar(new Grammar(builder));
+        }
+        Check(true, "wake grammar loaded");
         return 0;
     }
 }
