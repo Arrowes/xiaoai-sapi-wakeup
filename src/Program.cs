@@ -39,28 +39,106 @@ namespace SapiXiaoai
 
     internal sealed class TriggerGate
     {
-        private DateTime lastTriggerUtc = DateTime.MinValue;
+        private bool hasTriggered;
+        private long lastTriggerTimestamp;
 
-        public bool TryEnter(float confidence, DateTime utcNow, AppSettings settings)
+        public bool TryEnter(float confidence, long timestamp, long frequency, AppSettings settings)
         {
             if (confidence < settings.Confidence) return false;
-            if (utcNow - lastTriggerUtc < TimeSpan.FromSeconds(5)) return false;
-            lastTriggerUtc = utcNow;
+            if (hasTriggered && timestamp - lastTriggerTimestamp < 5L * frequency) return false;
+            hasTriggered = true;
+            lastTriggerTimestamp = timestamp;
             return true;
+        }
+    }
+
+    internal sealed class RecognitionCompletionPolicy
+    {
+        private int shutdownStarted;
+
+        public bool TryBeginUnexpectedFailure(Exception error, bool inputStreamEnded)
+        {
+            return (error != null || inputStreamEnded) &&
+                Interlocked.CompareExchange(ref shutdownStarted, 1, 0) == 0;
+        }
+
+        public void BeginShutdown()
+        {
+            Interlocked.Exchange(ref shutdownStarted, 1);
+        }
+    }
+
+    internal sealed class AsyncErrorNotifier
+    {
+        private readonly Func<Action, bool> post;
+        private readonly Action<string> show;
+        private readonly Action exit;
+        private int launchFailureOutstanding;
+        private int fatalFailureOutstanding;
+
+        public AsyncErrorNotifier(Func<Action, bool> post, Action<string> show, Action exit)
+        {
+            this.post = post;
+            this.show = show;
+            this.exit = exit;
+        }
+
+        public bool PostLaunchFailure(string message)
+        {
+            if (Interlocked.CompareExchange(ref launchFailureOutstanding, 1, 0) != 0)
+                return false;
+            return TryPost(delegate
+            {
+                try { show(message); }
+                finally { Interlocked.Exchange(ref launchFailureOutstanding, 0); }
+            }, ref launchFailureOutstanding);
+        }
+
+        public bool PostFatalFailure(string message)
+        {
+            if (Interlocked.CompareExchange(ref fatalFailureOutstanding, 1, 0) != 0)
+                return false;
+            return TryPost(delegate
+            {
+                try { show(message); }
+                finally { exit(); }
+            }, ref fatalFailureOutstanding);
+        }
+
+        private bool TryPost(Action action, ref int outstanding)
+        {
+            try
+            {
+                if (post(action)) return true;
+            }
+            catch (InvalidOperationException) { }
+            Interlocked.Exchange(ref outstanding, 0);
+            return false;
         }
     }
 
     internal static class RecognizerSupport
     {
-        public static RecognizerInfo GetZhCnRecognizer()
+        public static bool IsRequiredRecognizer(string id, string culture, string description)
         {
-            return SpeechRecognitionEngine.InstalledRecognizers()
-                .FirstOrDefault(x => x.Culture.Name.Equals("zh-CN", StringComparison.OrdinalIgnoreCase));
+            return id == "MS-2052-80-DESK" &&
+                culture != null && culture.Equals("zh-CN", StringComparison.OrdinalIgnoreCase) &&
+                description != null && description.IndexOf("Microsoft Speech Recognizer 8.0",
+                    StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
-        public static bool HasZhCnRecognizer()
+        public static RecognizerInfo GetRequiredRecognizer()
         {
-            return GetZhCnRecognizer() != null;
+            return SpeechRecognitionEngine.InstalledRecognizers().FirstOrDefault(x =>
+                IsRequiredRecognizer(x.Id, x.Culture.Name, x.Description));
+        }
+    }
+
+    internal static class ProcessLauncher
+    {
+        public static void StartAndDispose(Func<Process> start)
+        {
+            using (Process process = start()) { }
         }
     }
 
@@ -161,7 +239,10 @@ namespace SapiXiaoai
         private const uint SwpNoSize = 0x0001;
         private const uint SwpNoZOrder = 0x0004;
         private const uint SwpNoActivate = 0x0010;
+        private const uint SwpAsyncWindowPos = 0x4000;
         private const int ObjIdWindow = 0;
+        internal const uint ForeignMoveFlags =
+            SwpNoSize | SwpNoZOrder | SwpNoActivate | SwpAsyncWindowPos;
         private static readonly WinEventDelegate callback = OnWindowEvent;
         private static readonly WindowAnchorState state = new WindowAnchorState();
         private static IntPtr hook;
@@ -268,7 +349,7 @@ namespace SapiXiaoai
                     new Size(rect.Right - rect.Left, rect.Bottom - rect.Top));
                 if (rect.Left == target.X && rect.Top == target.Y) return true;
                 return SetWindowPos(hwnd, IntPtr.Zero, target.X, target.Y, 0, 0,
-                    SwpNoSize | SwpNoZOrder | SwpNoActivate);
+                    ForeignMoveFlags);
             });
         }
     }
@@ -279,6 +360,8 @@ namespace SapiXiaoai
         private static AppSettings settings;
         private static TriggerGate gate;
         private static string helperPath;
+        private static RecognitionCompletionPolicy completionPolicy;
+        private static AsyncErrorNotifier errorNotifier;
 
         [STAThread]
         private static void Main()
@@ -305,36 +388,70 @@ namespace SapiXiaoai
             helperPath = Path.Combine(basePath, "xiaoai.exe");
             if (!File.Exists(helperPath)) throw new FileNotFoundException("找不到同目录下的 xiaoai.exe。", helperPath);
 
-            RecognizerInfo info = RecognizerSupport.GetZhCnRecognizer();
-            if (info == null) throw new InvalidOperationException("找不到 Windows 简体中文语音识别器 (zh-CN)。");
+            RecognizerInfo info = RecognizerSupport.GetRequiredRecognizer();
+            if (info == null) throw new InvalidOperationException(
+                "找不到离线语音识别器 MS-2052-80-DESK (Microsoft Speech Recognizer 8.0, zh-CN)。");
 
             settings = AppSettings.Load(Path.Combine(basePath, "set.ini"));
             gate = new TriggerGate();
+            completionPolicy = new RecognitionCompletionPolicy();
+            using (Control dispatcher = new Control())
             using (SpeechRecognitionEngine engine = new SpeechRecognitionEngine(info))
             {
+                dispatcher.CreateControl();
+                errorNotifier = new AsyncErrorNotifier(
+                    delegate(Action action) { return TryPost(dispatcher, action); },
+                    delegate(string message)
+                    {
+                        MessageBox.Show(message, "SAPI 小爱唤醒器",
+                            MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    },
+                    Application.ExitThread);
                 GrammarBuilder builder = new GrammarBuilder("你好小爱");
                 builder.Culture = info.Culture;
                 engine.LoadGrammar(new Grammar(builder));
                 engine.SetInputToDefaultAudioDevice();
                 engine.SpeechRecognized += OnSpeechRecognized;
+                engine.RecognizeCompleted += OnRecognizeCompleted;
                 WindowAnchor.Start();
                 engine.RecognizeAsync(RecognizeMode.Multiple);
-                Application.Run();
+                try { Application.Run(); }
+                finally { completionPolicy.BeginShutdown(); }
             }
+        }
+
+        private static bool TryPost(Control dispatcher, Action action)
+        {
+            if (dispatcher.IsDisposed || dispatcher.Disposing || !dispatcher.IsHandleCreated)
+                return false;
+            dispatcher.BeginInvoke(action);
+            return true;
+        }
+
+        private static void OnRecognizeCompleted(object sender, RecognizeCompletedEventArgs e)
+        {
+            if (!completionPolicy.TryBeginUnexpectedFailure(e.Error, e.InputStreamEnded)) return;
+            string message = e.Error != null
+                ? "语音识别意外停止：" + e.Error.Message
+                : "语音识别输入已结束，请检查默认麦克风。";
+            errorNotifier.PostFatalFailure(message);
         }
 
         private static void OnSpeechRecognized(object sender, SpeechRecognizedEventArgs e)
         {
-            if (!gate.TryEnter(e.Result.Confidence, DateTime.UtcNow, settings)) return;
+            if (!gate.TryEnter(e.Result.Confidence, Stopwatch.GetTimestamp(),
+                Stopwatch.Frequency, settings)) return;
             try
             {
-                Process.Start(new ProcessStartInfo(helperPath) { UseShellExecute = true });
+                ProcessLauncher.StartAndDispose(delegate
+                {
+                    return Process.Start(new ProcessStartInfo(helperPath) { UseShellExecute = true });
+                });
                 WindowAnchor.AttachWhenAvailable();
             }
             catch (Exception ex)
             {
-                MessageBox.Show("无法启动小爱同学：" + ex.Message, "SAPI 小爱唤醒器",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                errorNotifier.PostLaunchFailure("无法启动小爱同学：" + ex.Message);
             }
         }
     }

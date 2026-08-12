@@ -8,6 +8,8 @@
 
 **Tech Stack:** C#、.NET Framework 4.x、`System.Speech`、`System.Windows.Forms`、Windows SAPI 8.0 `zh-CN`
 
+> **最终实现说明（2026-08-13）：** 本文保留下方最初的 TDD 步骤作为实施记录；其中嵌入的早期代码片段不是最终实现参考。经过完整评审和修复的权威实现是 [`src/Program.cs`](../../../src/Program.cs)，对应回归测试是 [`tests/ProgramTests.cs`](../../../tests/ProgramTests.cs)。最终版本固定选择 `MS-2052-80-DESK`，使用 `Stopwatch` 单调时间执行五秒冷却，通过隐藏 WinForms dispatcher 异步报告启动/识别错误，并使用 DPI 感知、异步发现、generation + HWND/thread/process/title/class 身份校验和异步原生移动来锚定窗口。
+
 ## Global Constraints
 
 - 唤醒词固定为“你好小爱”。
@@ -39,12 +41,12 @@
 
 **Interfaces:**
 - Produces: `AppSettings.Load(string path) -> AppSettings`
-- Produces: `TriggerGate.TryEnter(float confidence, DateTime utcNow, AppSettings settings) -> bool`
-- Produces: `RecognizerSupport.HasZhCnRecognizer() -> bool`
+- Produces: `TriggerGate.TryEnter(float confidence, long timestamp, long frequency, AppSettings settings) -> bool`
+- Produces: `RecognizerSupport.GetRequiredRecognizer() -> RecognizerInfo`
 
 - [ ] **Step 1: 写失败测试**
 
-创建 `ProgramTests.cs`，测试默认值、有效/无效配置、置信度门槛、五秒冷却和本机 `zh-CN` 识别器：
+创建 `ProgramTests.cs`，测试默认值、有效/无效配置、置信度门槛、单调时钟五秒边界和本机固定离线识别器：
 
 ```csharp
 using System;
@@ -79,12 +81,12 @@ internal static class ProgramTests
         Check(Math.Abs(fallback.Confidence - 0.75f) < 0.001f, "invalid confidence fallback");
 
         TriggerGate gate = new TriggerGate();
-        DateTime start = new DateTime(2026, 8, 12, 0, 0, 0, DateTimeKind.Utc);
-        Check(!gate.TryEnter(0.74f, start, defaults), "below confidence rejected");
-        Check(gate.TryEnter(0.75f, start, defaults), "threshold accepted");
-        Check(!gate.TryEnter(0.99f, start.AddSeconds(4), defaults), "cooldown rejected");
-        Check(gate.TryEnter(0.99f, start.AddSeconds(5), defaults), "cooldown elapsed");
-        Check(RecognizerSupport.HasZhCnRecognizer(), "zh-CN recognizer installed");
+        const long frequency = 1000;
+        const long start = 123456;
+        Check(!gate.TryEnter(0.74f, start, frequency, defaults), "below confidence rejected");
+        Check(gate.TryEnter(0.75f, start, frequency, defaults), "threshold accepted");
+        Check(!gate.TryEnter(0.99f, start + 4999, frequency, defaults), "cooldown rejected");
+        Check(gate.TryEnter(0.99f, start + 5000, frequency, defaults), "cooldown elapsed");
         return 0;
     }
 }
@@ -140,23 +142,28 @@ namespace SapiXiaoai
 
     internal sealed class TriggerGate
     {
-        private DateTime lastTriggerUtc = DateTime.MinValue;
+        private bool hasTriggered;
+        private long lastTriggerTimestamp;
 
-        public bool TryEnter(float confidence, DateTime utcNow, AppSettings settings)
+        public bool TryEnter(float confidence, long timestamp, long frequency, AppSettings settings)
         {
             if (confidence < settings.Confidence) return false;
-            if (utcNow - lastTriggerUtc < TimeSpan.FromSeconds(5)) return false;
-            lastTriggerUtc = utcNow;
+            if (hasTriggered && timestamp - lastTriggerTimestamp < 5L * frequency) return false;
+            hasTriggered = true;
+            lastTriggerTimestamp = timestamp;
             return true;
         }
     }
 
     internal static class RecognizerSupport
     {
-        public static bool HasZhCnRecognizer()
+        public static RecognizerInfo GetRequiredRecognizer()
         {
             return SpeechRecognitionEngine.InstalledRecognizers()
-                .Any(x => x.Culture.Name.Equals("zh-CN", StringComparison.OrdinalIgnoreCase));
+                .FirstOrDefault(x => x.Id == "MS-2052-80-DESK" &&
+                    x.Culture.Name.Equals("zh-CN", StringComparison.OrdinalIgnoreCase) &&
+                    x.Description.IndexOf("Microsoft Speech Recognizer 8.0",
+                        StringComparison.OrdinalIgnoreCase) >= 0);
         }
     }
 }
@@ -178,7 +185,7 @@ namespace SapiXiaoai
 - Modify: `src/Program.cs`
 
 **Interfaces:**
-- Consumes: `AppSettings.Load`、`TriggerGate.TryEnter`、`RecognizerSupport.HasZhCnRecognizer`
+- Consumes: `AppSettings.Load`、`TriggerGate.TryEnter`、`RecognizerSupport.GetRequiredRecognizer`
 - Produces: `Program.Main()` 隐藏窗口入口
 - Produces: `Program.LaunchXiaoai()` 启动同目录 `xiaoai.exe`
 
@@ -187,8 +194,11 @@ namespace SapiXiaoai
 在 `ProgramTests.cs` 顶部加入 `using System.Speech.Recognition;`，并在测试入口末尾创建 `zh-CN` `GrammarBuilder`，加载“你好小爱”后释放识别器；成功加载即通过：
 
 ```csharp
-RecognizerInfo info = RecognizerSupport.GetZhCnRecognizer();
-Check(info != null, "zh-CN recognizer selected");
+RecognizerInfo info = RecognizerSupport.GetRequiredRecognizer();
+Check(info != null && info.Id == "MS-2052-80-DESK" &&
+    info.Culture.Name == "zh-CN" &&
+    info.Description.Contains("Microsoft Speech Recognizer 8.0"),
+    "exact offline recognizer selected");
 using (SpeechRecognitionEngine engine = new SpeechRecognitionEngine(info))
 {
     GrammarBuilder builder = new GrammarBuilder("你好小爱");
@@ -201,10 +211,12 @@ Check(true, "wake grammar loaded");
 并在 `RecognizerSupport` 接口中增加：
 
 ```csharp
-public static RecognizerInfo GetZhCnRecognizer()
+public static RecognizerInfo GetRequiredRecognizer()
 {
     return SpeechRecognitionEngine.InstalledRecognizers()
-        .FirstOrDefault(x => x.Culture.Name.Equals("zh-CN", StringComparison.OrdinalIgnoreCase));
+        .FirstOrDefault(x => x.Id == "MS-2052-80-DESK" &&
+            x.Culture.Name.Equals("zh-CN", StringComparison.OrdinalIgnoreCase) &&
+            x.Description.Contains("Microsoft Speech Recognizer 8.0"));
 }
 ```
 
@@ -212,86 +224,24 @@ public static RecognizerInfo GetZhCnRecognizer()
 
 运行 Task 1 的测试编译命令。
 
-预期：编译失败，提示 `GetZhCnRecognizer` 不存在。
+预期：编译失败，提示 `GetRequiredRecognizer` 不存在。
 
 - [ ] **Step 3: 实现 SAPI 主循环**
 
 在 `Program.cs` 中：
 
-- 用 `InstalledRecognizers().FirstOrDefault(...)` 实现 `GetZhCnRecognizer`，并让 `HasZhCnRecognizer` 调用它。
+- 用 `InstalledRecognizers().FirstOrDefault(...)` 同时匹配固定 ID、`zh-CN` culture 和 8.0 description。
 - 在 `#if !TEST` 中加入 `Program.Main`，避免测试入口冲突。
 - 使用命名互斥量 `Local\SapiXiaoai.SingleInstance`。
 - 配置路径固定为 EXE 同目录已有的 `set.ini`；不存在时使用默认值，不创建文件。
 - helper 路径固定为 EXE 同目录的 `xiaoai.exe`。
 - 使用 `GrammarBuilder("你好小爱")`、默认麦克风和 `RecognizeMode.Multiple`。
-- `SpeechRecognized` 回调仅在 `TriggerGate.TryEnter` 返回 `true` 时调用 `Process.Start`。
-- 初始化失败用中文 `MessageBox.Show` 后退出；helper 启动失败显示错误但保持监听。
+- `SpeechRecognized` 回调仅在使用 `Stopwatch.GetTimestamp/Frequency` 的 `TriggerGate.TryEnter` 返回 `true` 时调用 `Process.Start`，并立即释放返回的 `Process` 组件。
+- 初始化失败用中文 `MessageBox.Show` 后退出；helper 启动失败通过隐藏 dispatcher 投递单个错误对话框，回调立即返回并继续监听。
+- `RecognizeCompleted` 的意外 `Error` 或 `InputStreamEnded` 通过同一个 dispatcher 显示一次错误并退出消息泵；正常关停取消不重复报告。
 - 用隐藏的 `Application.Run()` 消息循环保持后台进程存活，为后续 WinEvent 回调提供消息泵。
 
-核心实现如下；保持 Task 1 的三个类型不变，并补齐 `System.Diagnostics`、`System.Speech.Recognition`、`System.Threading`、`System.Windows.Forms` 引用：
-
-```csharp
-#if !TEST
-internal static class Program
-{
-    private static AppSettings settings;
-    private static TriggerGate gate;
-    private static string helperPath;
-
-    [STAThread]
-    private static void Main()
-    {
-        bool created;
-        using (Mutex mutex = new Mutex(true, @"Local\SapiXiaoai.SingleInstance", out created))
-        {
-            if (!created) return;
-            try { RunListener(); }
-            catch (Exception ex)
-            {
-                MessageBox.Show(ex.Message, "SAPI 小爱唤醒器", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
-    }
-
-    private static void RunListener()
-    {
-        string basePath = AppDomain.CurrentDomain.BaseDirectory;
-        helperPath = Path.Combine(basePath, "xiaoai.exe");
-        if (!File.Exists(helperPath)) throw new FileNotFoundException("找不到同目录下的 xiaoai.exe。", helperPath);
-
-        RecognizerInfo info = RecognizerSupport.GetZhCnRecognizer();
-        if (info == null) throw new InvalidOperationException("找不到 Windows 简体中文语音识别器 (zh-CN)。");
-
-        settings = AppSettings.Load(Path.Combine(basePath, "set.ini"));
-        gate = new TriggerGate();
-        using (SpeechRecognitionEngine engine = new SpeechRecognitionEngine(info))
-        {
-            GrammarBuilder builder = new GrammarBuilder("你好小爱");
-            builder.Culture = info.Culture;
-            engine.LoadGrammar(new Grammar(builder));
-            engine.SetInputToDefaultAudioDevice();
-            engine.SpeechRecognized += OnSpeechRecognized;
-            engine.RecognizeAsync(RecognizeMode.Multiple);
-            Application.Run();
-        }
-    }
-
-    private static void OnSpeechRecognized(object sender, SpeechRecognizedEventArgs e)
-    {
-        if (!gate.TryEnter(e.Result.Confidence, DateTime.UtcNow, settings)) return;
-        try
-        {
-            Process.Start(new ProcessStartInfo(helperPath) { UseShellExecute = true });
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show("无法启动小爱同学：" + ex.Message, "SAPI 小爱唤醒器",
-                MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
-    }
-}
-#endif
-```
+最终主循环不再内嵌复制在计划中；请直接使用 [`src/Program.cs`](../../../src/Program.cs) 的评审版本。它让隐藏 `Control` 与 `SpeechRecognitionEngine` 一起包围 `Application.Run()` 的完整生命周期，先创建 dispatcher handle，再订阅 `SpeechRecognized`/`RecognizeCompleted`。所有 SAPI 回调只做门控、进程启动或 `BeginInvoke` 投递；对话框和 `Application.ExitThread` 只在主 STA 消息泵执行。
 
 - [ ] **Step 4: 运行全部核心测试**
 
@@ -347,95 +297,15 @@ Check(clamped == new Point(100, 50), "oversized window clamped");
 
 - [ ] **Step 3: 实现坐标计算和原生事件锚定**
 
-在同一个 `Program.cs` 中添加 `WindowAnchor`，不得拆分新运行文件。实现使用以下原生接口和常量：
+最初的同步/raw-HWND 示例已删除，因为它在 `SpeechRecognized` 回调中执行 50 × 100 ms 等待，并可能把过期或复用的 HWND 当作当前目标。最终实现直接见 [`src/Program.cs`](../../../src/Program.cs)，其锚定路径为：
 
-```csharp
-internal static class WindowAnchor
-{
-    private const uint EventObjectLocationChange = 0x800B;
-    private const uint WineventOutOfContext = 0;
-    private const uint SwpNoSize = 0x0001;
-    private const uint SwpNoZOrder = 0x0004;
-    private const uint SwpNoActivate = 0x0010;
-    private const int ObjIdWindow = 0;
-    private static readonly WinEventDelegate callback = OnWindowEvent;
-    private static IntPtr targetWindow;
-    private static IntPtr hook;
+- 在创建任何屏幕/UI 状态之前启用进程 DPI 感知，所有 `12` 像素计算均使用物理坐标。
+- 每次真实唤醒只创建一个 generation，并把最长五秒的发现工作提交给 ThreadPool；回调立即返回，空闲时没有轮询线程或 `Timer`。
+- 附加状态同时保存 generation、HWND、线程 ID 和进程 ID；移动前在同一个状态锁内重新验证 thread/process、窗口类名和标题，失败只清除仍匹配的目标。
+- `SetWindowPos` 使用 `SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS`；跨进程窗口无响应时只投递移动，不阻塞 WinForms/SAPI 事件路径。
+- `EVENT_OBJECT_LOCATIONCHANGE` 钩子仍只在主 STA 消息泵上存活，并在应用退出时解除。
 
-    internal delegate void WinEventDelegate(IntPtr hWinEventHook, uint eventType,
-        IntPtr hwnd, int idObject, int idChild, uint eventThread, uint eventTime);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct NativeRect { public int Left, Top, Right, Bottom; }
-
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    private static extern IntPtr FindWindow(string className, string windowName);
-    [DllImport("user32.dll")]
-    private static extern bool GetWindowRect(IntPtr hwnd, out NativeRect rect);
-    [DllImport("user32.dll")]
-    private static extern bool SetWindowPos(IntPtr hwnd, IntPtr insertAfter,
-        int x, int y, int cx, int cy, uint flags);
-    [DllImport("user32.dll")]
-    private static extern IntPtr SetWinEventHook(uint eventMin, uint eventMax,
-        IntPtr module, WinEventDelegate callback, uint processId, uint threadId, uint flags);
-    [DllImport("user32.dll")]
-    private static extern bool UnhookWinEvent(IntPtr hook);
-
-    public static Point CalculatePosition(Rectangle workArea, Size windowSize)
-    {
-        int x = Math.Max(workArea.Left, workArea.Right - windowSize.Width - 12);
-        int y = Math.Max(workArea.Top, workArea.Bottom - windowSize.Height - 12);
-        return new Point(x, y);
-    }
-
-    public static void Start()
-    {
-        hook = SetWinEventHook(EventObjectLocationChange, EventObjectLocationChange,
-            IntPtr.Zero, callback, 0, 0, WineventOutOfContext);
-        if (hook == IntPtr.Zero) throw new InvalidOperationException("无法监听小爱窗口位置变化。");
-        Application.ApplicationExit += delegate
-        {
-            if (hook != IntPtr.Zero) UnhookWinEvent(hook);
-            hook = IntPtr.Zero;
-        };
-    }
-
-    public static void AttachWhenAvailable()
-    {
-        for (int i = 0; i < 50; i++)
-        {
-            IntPtr hwnd = FindWindow("ApplicationFrameWindow", "小爱同学");
-            if (hwnd != IntPtr.Zero) { Attach(hwnd); return; }
-            Thread.Sleep(100);
-        }
-    }
-
-    private static void Attach(IntPtr hwnd)
-    {
-        targetWindow = hwnd;
-        MoveIfNeeded(hwnd);
-    }
-
-    private static void OnWindowEvent(IntPtr ignored, uint eventType, IntPtr hwnd,
-        int idObject, int idChild, uint eventThread, uint eventTime)
-    {
-        if (hwnd == targetWindow && idObject == ObjIdWindow) MoveIfNeeded(hwnd);
-    }
-
-    private static void MoveIfNeeded(IntPtr hwnd)
-    {
-        NativeRect rect;
-        if (!GetWindowRect(hwnd, out rect)) return;
-        Point target = CalculatePosition(Screen.PrimaryScreen.WorkingArea,
-            new Size(rect.Right - rect.Left, rect.Bottom - rect.Top));
-        if (rect.Left == target.X && rect.Top == target.Y) return;
-        SetWindowPos(hwnd, IntPtr.Zero, target.X, target.Y, 0, 0,
-            SwpNoSize | SwpNoZOrder | SwpNoActivate);
-    }
-}
-```
-
-加入所需引用：`System.Drawing`、`System.Runtime.InteropServices`。生产编译命令增加 `/reference:System.Drawing.dll`。
+生产编译继续引用 `System.Drawing.dll`，不增加运行文件或依赖。
 
 - [ ] **Step 4: 接入聆听触发**
 
