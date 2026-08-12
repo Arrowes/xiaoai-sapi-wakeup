@@ -1,0 +1,9 @@
+.worktrees/
+.superpowers/
+work/
+build/
+outputs/
+*.user
+*.suo
+*.pdb
+
