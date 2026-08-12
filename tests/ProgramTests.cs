@@ -55,6 +55,18 @@ internal static class ProgramTests
         Point clamped = WindowAnchor.CalculatePosition(
             new Rectangle(100, 50, 800, 600), new Size(1000, 700));
         Check(clamped == new Point(100, 50), "oversized window clamped");
+
+        WindowAnchorState anchorState = new WindowAnchorState();
+        int staleDiscovery = anchorState.BeginDiscovery();
+        int currentDiscovery = anchorState.BeginDiscovery();
+        Check(!anchorState.TryAttach(staleDiscovery, new IntPtr(1)),
+            "superseded discovery cannot attach stale result");
+        Check(anchorState.TryAttach(currentDiscovery, new IntPtr(2)) &&
+            anchorState.IsTarget(new IntPtr(2)), "current discovery attaches result");
+        anchorState.ClearTarget(new IntPtr(1));
+        Check(anchorState.IsTarget(new IntPtr(2)), "stale clear preserves current target");
+        anchorState.BeginDiscovery();
+        Check(!anchorState.IsTarget(new IntPtr(2)), "new discovery clears prior target");
         return 0;
     }
 }

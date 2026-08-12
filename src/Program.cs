@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Speech.Recognition;
+using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 
@@ -63,6 +64,45 @@ namespace SapiXiaoai
         }
     }
 
+    internal sealed class WindowAnchorState
+    {
+        private readonly object sync = new object();
+        private int generation;
+        private IntPtr targetWindow;
+
+        public int BeginDiscovery()
+        {
+            lock (sync)
+            {
+                targetWindow = IntPtr.Zero;
+                return ++generation;
+            }
+        }
+
+        public bool TryAttach(int discoveryGeneration, IntPtr hwnd)
+        {
+            lock (sync)
+            {
+                if (discoveryGeneration != generation) return false;
+                targetWindow = hwnd;
+                return true;
+            }
+        }
+
+        public bool IsTarget(IntPtr hwnd)
+        {
+            lock (sync) return hwnd != IntPtr.Zero && hwnd == targetWindow;
+        }
+
+        public void ClearTarget(IntPtr hwnd)
+        {
+            lock (sync)
+            {
+                if (hwnd == targetWindow) targetWindow = IntPtr.Zero;
+            }
+        }
+    }
+
     internal static class WindowAnchor
     {
         private const uint EventObjectLocationChange = 0x800B;
@@ -72,7 +112,7 @@ namespace SapiXiaoai
         private const uint SwpNoActivate = 0x0010;
         private const int ObjIdWindow = 0;
         private static readonly WinEventDelegate callback = OnWindowEvent;
-        private static IntPtr targetWindow;
+        private static readonly WindowAnchorState state = new WindowAnchorState();
         private static IntPtr hook;
 
         internal delegate void WinEventDelegate(IntPtr hWinEventHook, uint eventType,
@@ -83,6 +123,10 @@ namespace SapiXiaoai
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         private static extern IntPtr FindWindow(string className, string windowName);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetClassName(IntPtr hwnd, StringBuilder className, int maximumCount);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetWindowText(IntPtr hwnd, StringBuilder windowName, int maximumCount);
         [DllImport("user32.dll")]
         private static extern bool GetWindowRect(IntPtr hwnd, out NativeRect rect);
         [DllImport("user32.dll")]
@@ -115,33 +159,50 @@ namespace SapiXiaoai
 
         public static void AttachWhenAvailable()
         {
+            int generation = state.BeginDiscovery();
+            ThreadPool.QueueUserWorkItem(delegate(object ignored) { Discover(generation); });
+        }
+
+        private static void Discover(int generation)
+        {
             for (int i = 0; i < 50; i++)
             {
                 IntPtr hwnd = FindWindow("ApplicationFrameWindow", "小爱同学");
-                if (hwnd != IntPtr.Zero) { Attach(hwnd); return; }
+                if (hwnd != IntPtr.Zero && IsExpectedWindow(hwnd))
+                {
+                    if (state.TryAttach(generation, hwnd)) MoveIfNeeded(hwnd);
+                    return;
+                }
                 Thread.Sleep(100);
             }
         }
 
-        private static void Attach(IntPtr hwnd)
+        private static bool IsExpectedWindow(IntPtr hwnd)
         {
-            targetWindow = hwnd;
-            MoveIfNeeded(hwnd);
+            StringBuilder className = new StringBuilder(256);
+            StringBuilder windowName = new StringBuilder(256);
+            return GetClassName(hwnd, className, className.Capacity) > 0 &&
+                GetWindowText(hwnd, windowName, windowName.Capacity) > 0 &&
+                className.ToString() == "ApplicationFrameWindow" &&
+                windowName.ToString() == "小爱同学";
         }
 
         private static void OnWindowEvent(IntPtr ignored, uint eventType, IntPtr hwnd,
             int idObject, int idChild, uint eventThread, uint eventTime)
         {
-            if (hwnd == targetWindow && idObject == ObjIdWindow) MoveIfNeeded(hwnd);
+            if (idObject == ObjIdWindow && state.IsTarget(hwnd)) MoveIfNeeded(hwnd);
         }
 
         private static void MoveIfNeeded(IntPtr hwnd)
         {
+            if (!state.IsTarget(hwnd)) return;
+            if (!IsExpectedWindow(hwnd)) { state.ClearTarget(hwnd); return; }
             NativeRect rect;
-            if (!GetWindowRect(hwnd, out rect)) return;
+            if (!GetWindowRect(hwnd, out rect)) { state.ClearTarget(hwnd); return; }
             Point target = CalculatePosition(Screen.PrimaryScreen.WorkingArea,
                 new Size(rect.Right - rect.Left, rect.Bottom - rect.Top));
             if (rect.Left == target.X && rect.Top == target.Y) return;
+            if (!state.IsTarget(hwnd)) return;
             SetWindowPos(hwnd, IntPtr.Zero, target.X, target.Y, 0, 0,
                 SwpNoSize | SwpNoZOrder | SwpNoActivate);
         }
