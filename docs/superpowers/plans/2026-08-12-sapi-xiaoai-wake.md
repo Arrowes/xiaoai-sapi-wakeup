@@ -226,7 +226,7 @@ public static RecognizerInfo GetZhCnRecognizer()
 - 使用 `GrammarBuilder("你好小爱")`、默认麦克风和 `RecognizeMode.Multiple`。
 - `SpeechRecognized` 回调仅在 `TriggerGate.TryEnter` 返回 `true` 时调用 `Process.Start`。
 - 初始化失败用中文 `MessageBox.Show` 后退出；helper 启动失败显示错误但保持监听。
-- 用 `ManualResetEvent(false).WaitOne()` 保持后台进程存活。
+- 用隐藏的 `Application.Run()` 消息循环保持后台进程存活，为后续 WinEvent 回调提供消息泵。
 
 核心实现如下；保持 Task 1 的三个类型不变，并补齐 `System.Diagnostics`、`System.Speech.Recognition`、`System.Threading`、`System.Windows.Forms` 引用：
 
