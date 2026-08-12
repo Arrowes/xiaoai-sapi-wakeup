@@ -1,11 +1,16 @@
 using System;
 using System.Drawing;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Speech.Recognition;
+using System.Diagnostics;
 using SapiXiaoai;
 
 internal static class ProgramTests
 {
+    [DllImport("shcore.dll")]
+    private static extern int GetProcessDpiAwareness(IntPtr process, out int awareness);
+
     private static void Check(bool condition, string name)
     {
         if (!condition) throw new Exception("FAIL: " + name);
@@ -14,6 +19,11 @@ internal static class ProgramTests
 
     public static int Main()
     {
+        DpiAwareness.Enable();
+        int awareness;
+        Check(GetProcessDpiAwareness(Process.GetCurrentProcess().Handle, out awareness) == 0 &&
+            awareness == 1, "process uses physical screen coordinates");
+
         string root = Path.Combine(Path.GetTempPath(), "SapiXiaoaiTests");
         Directory.CreateDirectory(root);
 

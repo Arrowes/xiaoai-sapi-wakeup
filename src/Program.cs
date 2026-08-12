@@ -64,6 +64,18 @@ namespace SapiXiaoai
         }
     }
 
+    internal static class DpiAwareness
+    {
+        [DllImport("user32.dll")]
+        private static extern bool SetProcessDPIAware();
+
+        public static void Enable()
+        {
+            if (!SetProcessDPIAware())
+                throw new InvalidOperationException("无法启用屏幕 DPI 感知。");
+        }
+    }
+
     internal sealed class WindowAnchorState
     {
         private readonly object sync = new object();
@@ -275,7 +287,11 @@ namespace SapiXiaoai
             using (Mutex mutex = new Mutex(true, @"Local\SapiXiaoai.SingleInstance", out created))
             {
                 if (!created) return;
-                try { RunListener(); }
+                try
+                {
+                    DpiAwareness.Enable();
+                    RunListener();
+                }
                 catch (Exception ex)
                 {
                     MessageBox.Show(ex.Message, "SAPI 小爱唤醒器", MessageBoxButtons.OK, MessageBoxIcon.Error);
