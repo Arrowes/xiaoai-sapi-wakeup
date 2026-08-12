@@ -272,7 +272,7 @@ internal static class Program
             engine.SetInputToDefaultAudioDevice();
             engine.SpeechRecognized += OnSpeechRecognized;
             engine.RecognizeAsync(RecognizeMode.Multiple);
-            new ManualResetEvent(false).WaitOne();
+            Application.Run();
         }
     }
 
@@ -376,8 +376,6 @@ internal static class WindowAnchor
     private static extern bool SetWindowPos(IntPtr hwnd, IntPtr insertAfter,
         int x, int y, int cx, int cy, uint flags);
     [DllImport("user32.dll")]
-    private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
-    [DllImport("user32.dll")]
     private static extern IntPtr SetWinEventHook(uint eventMin, uint eventMax,
         IntPtr module, WinEventDelegate callback, uint processId, uint threadId, uint flags);
     [DllImport("user32.dll")]
@@ -388,6 +386,18 @@ internal static class WindowAnchor
         int x = Math.Max(workArea.Left, workArea.Right - windowSize.Width - 12);
         int y = Math.Max(workArea.Top, workArea.Bottom - windowSize.Height - 12);
         return new Point(x, y);
+    }
+
+    public static void Start()
+    {
+        hook = SetWinEventHook(EventObjectLocationChange, EventObjectLocationChange,
+            IntPtr.Zero, callback, 0, 0, WineventOutOfContext);
+        if (hook == IntPtr.Zero) throw new InvalidOperationException("无法监听小爱窗口位置变化。");
+        Application.ApplicationExit += delegate
+        {
+            if (hook != IntPtr.Zero) UnhookWinEvent(hook);
+            hook = IntPtr.Zero;
+        };
     }
 
     public static void AttachWhenAvailable()
@@ -402,13 +412,8 @@ internal static class WindowAnchor
 
     private static void Attach(IntPtr hwnd)
     {
-        if (hook != IntPtr.Zero) { UnhookWinEvent(hook); hook = IntPtr.Zero; }
         targetWindow = hwnd;
         MoveIfNeeded(hwnd);
-        uint processId;
-        GetWindowThreadProcessId(hwnd, out processId);
-        hook = SetWinEventHook(EventObjectLocationChange, EventObjectLocationChange,
-            IntPtr.Zero, callback, processId, 0, WineventOutOfContext);
     }
 
     private static void OnWindowEvent(IntPtr ignored, uint eventType, IntPtr hwnd,
@@ -434,13 +439,17 @@ internal static class WindowAnchor
 
 - [ ] **Step 4: 接入聆听触发**
 
-在 `Process.Start(...)` 成功后调用：
+在主线程进入 `Application.Run()` 前调用一次事件初始化，并在 `Process.Start(...)` 成功后查找目标窗口：
 
 ```csharp
+WindowAnchor.Start();
+// engine.RecognizeAsync(...) 之后由主线程调用 Application.Run()
+
+// SpeechRecognized 回调成功启动 helper 后：
 WindowAnchor.AttachWhenAvailable();
 ```
 
-这个最多五秒的短时重试只在真实唤醒后执行。空闲期不得存在 `Timer`、`while` 循环或后台轮询线程。
+`WindowAnchor.Start()` 必须由运行 WinForms 消息循环的主线程调用，保证 `WINEVENT_OUTOFCONTEXT` 回调能够送达。全局钩子只订阅位置变化并立即按目标 HWND 过滤。最多五秒的短时重试只在真实唤醒后执行；空闲期不得存在 `Timer`、`while` 循环或后台轮询线程。
 
 - [ ] **Step 5: 运行全部测试**
 
