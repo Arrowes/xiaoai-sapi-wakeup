@@ -1,4 +1,5 @@
 using System;
+using System.Drawing;
 using System.IO;
 using System.Speech.Recognition;
 using SapiXiaoai;
@@ -46,6 +47,14 @@ internal static class ProgramTests
             engine.LoadGrammar(new Grammar(builder));
         }
         Check(true, "wake grammar loaded");
+
+        Point position = WindowAnchor.CalculatePosition(
+            new Rectangle(0, 0, 1920, 1040), new Size(400, 300));
+        Check(position == new Point(1508, 728), "bottom-right with 12px margin");
+
+        Point clamped = WindowAnchor.CalculatePosition(
+            new Rectangle(100, 50, 800, 600), new Size(1000, 700));
+        Check(clamped == new Point(100, 50), "oversized window clamped");
         return 0;
     }
 }

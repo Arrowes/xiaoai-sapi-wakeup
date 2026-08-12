@@ -1,8 +1,10 @@
 using System;
 using System.Diagnostics;
+using System.Drawing;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Speech.Recognition;
 using System.Threading;
 using System.Windows.Forms;
@@ -61,6 +63,90 @@ namespace SapiXiaoai
         }
     }
 
+    internal static class WindowAnchor
+    {
+        private const uint EventObjectLocationChange = 0x800B;
+        private const uint WineventOutOfContext = 0;
+        private const uint SwpNoSize = 0x0001;
+        private const uint SwpNoZOrder = 0x0004;
+        private const uint SwpNoActivate = 0x0010;
+        private const int ObjIdWindow = 0;
+        private static readonly WinEventDelegate callback = OnWindowEvent;
+        private static IntPtr targetWindow;
+        private static IntPtr hook;
+
+        internal delegate void WinEventDelegate(IntPtr hWinEventHook, uint eventType,
+            IntPtr hwnd, int idObject, int idChild, uint eventThread, uint eventTime);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativeRect { public int Left, Top, Right, Bottom; }
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern IntPtr FindWindow(string className, string windowName);
+        [DllImport("user32.dll")]
+        private static extern bool GetWindowRect(IntPtr hwnd, out NativeRect rect);
+        [DllImport("user32.dll")]
+        private static extern bool SetWindowPos(IntPtr hwnd, IntPtr insertAfter,
+            int x, int y, int cx, int cy, uint flags);
+        [DllImport("user32.dll")]
+        private static extern IntPtr SetWinEventHook(uint eventMin, uint eventMax,
+            IntPtr module, WinEventDelegate callback, uint processId, uint threadId, uint flags);
+        [DllImport("user32.dll")]
+        private static extern bool UnhookWinEvent(IntPtr hook);
+
+        public static Point CalculatePosition(Rectangle workArea, Size windowSize)
+        {
+            int x = Math.Max(workArea.Left, workArea.Right - windowSize.Width - 12);
+            int y = Math.Max(workArea.Top, workArea.Bottom - windowSize.Height - 12);
+            return new Point(x, y);
+        }
+
+        public static void Start()
+        {
+            hook = SetWinEventHook(EventObjectLocationChange, EventObjectLocationChange,
+                IntPtr.Zero, callback, 0, 0, WineventOutOfContext);
+            if (hook == IntPtr.Zero) throw new InvalidOperationException("无法监听小爱窗口位置变化。");
+            Application.ApplicationExit += delegate
+            {
+                if (hook != IntPtr.Zero) UnhookWinEvent(hook);
+                hook = IntPtr.Zero;
+            };
+        }
+
+        public static void AttachWhenAvailable()
+        {
+            for (int i = 0; i < 50; i++)
+            {
+                IntPtr hwnd = FindWindow("ApplicationFrameWindow", "小爱同学");
+                if (hwnd != IntPtr.Zero) { Attach(hwnd); return; }
+                Thread.Sleep(100);
+            }
+        }
+
+        private static void Attach(IntPtr hwnd)
+        {
+            targetWindow = hwnd;
+            MoveIfNeeded(hwnd);
+        }
+
+        private static void OnWindowEvent(IntPtr ignored, uint eventType, IntPtr hwnd,
+            int idObject, int idChild, uint eventThread, uint eventTime)
+        {
+            if (hwnd == targetWindow && idObject == ObjIdWindow) MoveIfNeeded(hwnd);
+        }
+
+        private static void MoveIfNeeded(IntPtr hwnd)
+        {
+            NativeRect rect;
+            if (!GetWindowRect(hwnd, out rect)) return;
+            Point target = CalculatePosition(Screen.PrimaryScreen.WorkingArea,
+                new Size(rect.Right - rect.Left, rect.Bottom - rect.Top));
+            if (rect.Left == target.X && rect.Top == target.Y) return;
+            SetWindowPos(hwnd, IntPtr.Zero, target.X, target.Y, 0, 0,
+                SwpNoSize | SwpNoZOrder | SwpNoActivate);
+        }
+    }
+
 #if !TEST
     internal static class Program
     {
@@ -101,6 +187,7 @@ namespace SapiXiaoai
                 engine.LoadGrammar(new Grammar(builder));
                 engine.SetInputToDefaultAudioDevice();
                 engine.SpeechRecognized += OnSpeechRecognized;
+                WindowAnchor.Start();
                 engine.RecognizeAsync(RecognizeMode.Multiple);
                 Application.Run();
             }
@@ -112,6 +199,7 @@ namespace SapiXiaoai
             try
             {
                 Process.Start(new ProcessStartInfo(helperPath) { UseShellExecute = true });
+                WindowAnchor.AttachWhenAvailable();
             }
             catch (Exception ex)
             {
