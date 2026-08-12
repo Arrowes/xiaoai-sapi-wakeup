@@ -95,7 +95,7 @@ internal static class ProgramTests
 运行：
 
 ```powershell
-& 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe' /nologo /target:exe /out:build\SapiXiaoai.Tests.exe /reference:System.Speech.dll src\Program.cs tests\ProgramTests.cs
+& 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe' /nologo /target:exe /out:build\SapiXiaoai.Tests.exe /reference:'C:\Windows\assembly\GAC_MSIL\System.Speech\3.0.0.0__31bf3856ad364e35\System.Speech.dll' src\Program.cs tests\ProgramTests.cs
 ```
 
 预期：编译失败，提示 `AppSettings`、`TriggerGate` 和 `RecognizerSupport` 尚未定义。
@@ -298,7 +298,7 @@ internal static class Program
 使用以下命令重新编译测试入口，并运行测试 EXE：
 
 ```powershell
-& 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe' /nologo /target:exe /define:TEST /out:build\SapiXiaoai.Tests.exe /reference:System.Speech.dll /reference:System.Windows.Forms.dll /reference:System.Drawing.dll src\Program.cs tests\ProgramTests.cs
+& 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe' /nologo /target:exe /define:TEST /out:build\SapiXiaoai.Tests.exe /reference:'C:\Windows\assembly\GAC_MSIL\System.Speech\3.0.0.0__31bf3856ad364e35\System.Speech.dll' /reference:System.Windows.Forms.dll /reference:System.Drawing.dll src\Program.cs tests\ProgramTests.cs
 & '.\build\SapiXiaoai.Tests.exe'
 ```
 
@@ -309,7 +309,7 @@ internal static class Program
 运行：
 
 ```powershell
-& 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe' /nologo /optimize+ /target:winexe /out:build\SapiXiaoai.exe /reference:System.Speech.dll /reference:System.Windows.Forms.dll /reference:System.Drawing.dll src\Program.cs
+& 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe' /nologo /optimize+ /target:winexe /out:build\SapiXiaoai.exe /reference:'C:\Windows\assembly\GAC_MSIL\System.Speech\3.0.0.0__31bf3856ad364e35\System.Speech.dll' /reference:System.Windows.Forms.dll /reference:System.Drawing.dll src\Program.cs
 ```
 
 预期：生成 `build\SapiXiaoai.exe`，无编译错误。
@@ -544,4 +544,5 @@ Get-FileHash -Algorithm SHA256 'outputs\SapiXiaoai.exe'
 ```
 
 关闭本轮测试启动的 `SapiXiaoai` 后台进程。不要自动创建开机启动项；等用户确认真实唤醒效果后再添加快捷方式。
+
 
