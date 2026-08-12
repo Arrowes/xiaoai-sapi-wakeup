@@ -462,10 +462,10 @@ WindowAnchor.AttachWhenAvailable();
 
 - [ ] **Step 1: 在临时隔离目录验证缺少 helper 的错误路径**
 
-创建 `work\sapi-xiaoai\isolated`，只把生产 EXE 复制进去，不复制 `xiaoai.exe`，再启动程序：
+创建 `work\isolated`，只把生产 EXE 复制进去，不复制 `xiaoai.exe`，再启动程序：
 
 ```powershell
-$isolated = 'work\sapi-xiaoai\isolated'
+$isolated = 'work\isolated'
 New-Item -ItemType Directory -Path $isolated -Force | Out-Null
 Copy-Item 'build\SapiXiaoai.exe' -Destination $isolated -Force
 Start-Process (Join-Path $isolated 'SapiXiaoai.exe')
