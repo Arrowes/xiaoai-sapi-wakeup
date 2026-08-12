@@ -102,7 +102,7 @@ namespace SapiXiaoai
                 engine.SetInputToDefaultAudioDevice();
                 engine.SpeechRecognized += OnSpeechRecognized;
                 engine.RecognizeAsync(RecognizeMode.Multiple);
-                new ManualResetEvent(false).WaitOne();
+                Application.Run();
             }
         }
 
