@@ -4,4 +4,6 @@
 
 设计目标：无云端 API、无 AccessKey、无第三方运行时，空闲资源占用和文件数量尽可能小。
 
+可直接运行的全部文件位于 `dist/SapiXiaoai/`。保持其中三个文件同目录，运行 `SapiXiaoai.exe` 即可；`set.ini` 只保存本地识别灵敏度，不含旧在线 API 密钥。
+
 详细设计与实施步骤见 `docs/superpowers/`。
