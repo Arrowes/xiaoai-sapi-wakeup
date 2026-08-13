@@ -226,6 +226,14 @@ internal static class ProgramTests
         Check(lateAnswer.ProcessLine("MediaPlayerDialogAudioOutputAdapter-PlaybackStateChanged, Playing ->Paused, BufferFinished: True") ==
             XiaoaiLogAction.ScheduleClose, "late answer closes only after playback finishes");
 
+        XiaoaiClosePolicy powerTask = new XiaoaiClosePolicy();
+        powerTask.ProcessLine("DialogManager: Session start: power-test");
+        Check(powerTask.ProcessLine("DirectLineSpeechDialogBackend-OnNlpInstructionEvent, type:Power, text:") ==
+            XiaoaiLogAction.CancelClose, "power task cancels pending window close");
+        powerTask.ProcessLine("PlaybackStateChanged, Buffering ->Playing");
+        Check(powerTask.ProcessLine("PlaybackStateChanged, Playing ->Paused, BufferFinished: True") ==
+            XiaoaiLogAction.None, "power task remains open after answer playback finishes");
+
         int currentGeneration;
         IntPtr currentWindow;
         uint currentThread;

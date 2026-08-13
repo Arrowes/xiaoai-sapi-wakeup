@@ -171,6 +171,7 @@ namespace SapiXiaoai
         private bool armed;
         private bool playbackSeen;
         private bool closePending;
+        private bool suppressClose;
 
         public XiaoaiLogAction ProcessLine(string line)
         {
@@ -180,9 +181,18 @@ namespace SapiXiaoai
                 armed = true;
                 playbackSeen = false;
                 closePending = false;
+                suppressClose = false;
                 return XiaoaiLogAction.CancelClose;
             }
             if (!armed) return XiaoaiLogAction.None;
+
+            if (line.IndexOf("OnNlpInstructionEvent, type:Power",
+                StringComparison.Ordinal) >= 0)
+            {
+                suppressClose = true;
+                closePending = false;
+                return XiaoaiLogAction.CancelClose;
+            }
 
             bool playbackChanged = line.IndexOf("PlaybackStateChanged",
                 StringComparison.Ordinal) >= 0;
@@ -208,7 +218,7 @@ namespace SapiXiaoai
 
         private XiaoaiLogAction ScheduleOnce()
         {
-            if (closePending) return XiaoaiLogAction.None;
+            if (suppressClose || closePending) return XiaoaiLogAction.None;
             closePending = true;
             return XiaoaiLogAction.ScheduleClose;
         }
@@ -701,6 +711,7 @@ namespace SapiXiaoai
                 {
                     return Process.Start(new ProcessStartInfo(helperPath) { UseShellExecute = true });
                 });
+                System.Media.SystemSounds.Beep.Play();
             }
             catch (Exception ex)
             {
