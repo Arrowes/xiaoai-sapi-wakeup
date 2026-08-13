@@ -12,6 +12,9 @@ sensitivities = 0.75
 cooldown_seconds = 1
 ```
 
+- `sensitivities`：语音识别置信度门槛，范围为 `0–1`。数值越高越严格，可减少误唤醒，但也可能降低识别率。
+- `cooldown_seconds`：两次有效唤醒之间的最短间隔，单位为秒，支持小数。
+
 源码和测试位于 `source/`，可运行文件位于 `dist/SapiXiaoai/`。
 
 ## 来源
