@@ -6,4 +6,6 @@
 
 可直接运行的全部文件位于 `dist/SapiXiaoai/`。保持其中三个文件同目录，运行 `SapiXiaoai.exe` 即可；`set.ini` 只保存本地识别灵敏度，不含旧在线 API 密钥。
 
+`set.ini` 中的 `cooldown_seconds` 控制两次有效唤醒的最短间隔，默认值为 `1` 秒。
+
 详细设计与实施步骤见 `docs/superpowers/`。

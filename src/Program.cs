@@ -15,6 +15,7 @@ namespace SapiXiaoai
     internal sealed class AppSettings
     {
         public float Confidence = 0.75f;
+        public float CooldownSeconds = 1f;
 
         public static AppSettings Load(string path)
         {
@@ -32,6 +33,9 @@ namespace SapiXiaoai
                 if (!float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out number)) continue;
                 if (key.Equals("sensitivities", StringComparison.OrdinalIgnoreCase) && number >= 0f && number <= 1f)
                     result.Confidence = number;
+                else if (key.Equals("cooldown_seconds", StringComparison.OrdinalIgnoreCase) &&
+                    number > 0f && !float.IsInfinity(number))
+                    result.CooldownSeconds = number;
             }
             return result;
         }
@@ -45,7 +49,7 @@ namespace SapiXiaoai
         public bool TryEnter(float confidence, long timestamp, long frequency, AppSettings settings)
         {
             if (confidence < settings.Confidence) return false;
-            if (hasTriggered && timestamp - lastTriggerTimestamp < 5L * frequency) return false;
+            if (hasTriggered && timestamp - lastTriggerTimestamp < settings.CooldownSeconds * frequency) return false;
             hasTriggered = true;
             lastTriggerTimestamp = timestamp;
             return true;

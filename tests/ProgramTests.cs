@@ -42,25 +42,35 @@ internal static class ProgramTests
         string missing = Path.Combine(root, "missing.ini");
         AppSettings defaults = AppSettings.Load(missing);
         Check(Math.Abs(defaults.Confidence - 0.75f) < 0.001f, "missing config confidence");
+        Check(Math.Abs(defaults.CooldownSeconds - 1f) < 0.001f, "missing config one-second cooldown");
 
         string valid = Path.Combine(root, "valid.ini");
-        File.WriteAllText(valid, "[settings]\r\nsensitivities = 0.82\r\n");
+        File.WriteAllText(valid, "[settings]\r\nsensitivities = 0.82\r\ncooldown_seconds = 2.5\r\n");
         AppSettings configured = AppSettings.Load(valid);
         Check(Math.Abs(configured.Confidence - 0.82f) < 0.001f, "valid confidence");
+        Check(Math.Abs(configured.CooldownSeconds - 2.5f) < 0.001f, "valid cooldown");
 
         string invalid = Path.Combine(root, "invalid.ini");
-        File.WriteAllText(invalid, "[settings]\r\nsensitivities = 2\r\n");
+        File.WriteAllText(invalid, "[settings]\r\nsensitivities = 2\r\ncooldown_seconds = -1\r\n");
         AppSettings fallback = AppSettings.Load(invalid);
         Check(Math.Abs(fallback.Confidence - 0.75f) < 0.001f, "invalid confidence fallback");
+        Check(Math.Abs(fallback.CooldownSeconds - 1f) < 0.001f, "invalid cooldown fallback");
 
         TriggerGate gate = new TriggerGate();
         const long frequency = 1000;
         const long start = 123456;
         Check(!gate.TryEnter(0.74f, start, frequency, defaults), "below confidence rejected");
         Check(gate.TryEnter(0.75f, start, frequency, defaults), "threshold accepted");
-        Check(!gate.TryEnter(0.99f, start + 4999, frequency, defaults), "cooldown rejected");
-        Check(gate.TryEnter(0.99f, start + 5000, frequency, defaults),
+        Check(!gate.TryEnter(0.99f, start + 999, frequency, defaults), "cooldown rejected");
+        Check(gate.TryEnter(0.99f, start + 1000, frequency, defaults),
             "cooldown exact monotonic boundary accepted");
+
+        TriggerGate configuredGate = new TriggerGate();
+        Check(configuredGate.TryEnter(0.99f, start, frequency, configured), "configured cooldown first trigger");
+        Check(!configuredGate.TryEnter(0.99f, start + 2499, frequency, configured),
+            "configured cooldown rejected");
+        Check(configuredGate.TryEnter(0.99f, start + 2500, frequency, configured),
+            "configured cooldown exact boundary accepted");
 
         RecognitionCompletionPolicy normalCompletion = new RecognitionCompletionPolicy();
         Check(!normalCompletion.TryBeginUnexpectedFailure(null, false),

@@ -8,7 +8,7 @@
 
 **Tech Stack:** C#、.NET Framework 4.x、`System.Speech`、`System.Windows.Forms`、Windows SAPI 8.0 `zh-CN`
 
-> **最终实现说明（2026-08-13）：** 本文保留下方最初的 TDD 步骤作为实施记录；其中嵌入的早期代码片段不是最终实现参考。经过完整评审和修复的权威实现是 [`src/Program.cs`](../../../src/Program.cs)，对应回归测试是 [`tests/ProgramTests.cs`](../../../tests/ProgramTests.cs)。最终版本固定选择 `MS-2052-80-DESK`，使用 `Stopwatch` 单调时间执行五秒冷却，通过隐藏 WinForms dispatcher 异步报告启动/识别错误，并使用 DPI 感知、异步发现、generation + HWND/thread/process/title/class 身份校验和异步原生移动来锚定窗口。
+> **最终实现说明（2026-08-13）：** 本文保留下方最初的 TDD 步骤作为实施记录；其中嵌入的早期代码片段不是最终实现参考。经过完整评审和修复的权威实现是 [`src/Program.cs`](../../../src/Program.cs)，对应回归测试是 [`tests/ProgramTests.cs`](../../../tests/ProgramTests.cs)。最终版本固定选择 `MS-2052-80-DESK`，使用 `Stopwatch` 单调时间执行默认一秒、可配置的冷却，通过隐藏 WinForms dispatcher 异步报告启动/识别错误，并使用 DPI 感知、异步发现、generation + HWND/thread/process/title/class 身份校验和异步原生移动来锚定窗口。
 
 ## Global Constraints
 
@@ -17,7 +17,7 @@
 - 运行期间不得调用云端 API，不得要求账户或 AccessKey。
 - 复用 `E:\各种素材\小米\VoiceXiaoai\xiaoai.exe`，不覆盖原项目文件。
 - 触发必须调用原项目 `xiaoai.exe`；禁止改用包内 `Xiaoai.exe` 或 `shell:appsFolder` URI，因为普通启动只打开窗口而不保证进入聆听。
-- 复用现有 `set.ini` 的 `sensitivities`，默认值 `0.75`；冷却固定 `5` 秒。
+- 复用现有 `set.ini` 的 `sensitivities`，默认值 `0.75`；`cooldown_seconds` 控制冷却时间，默认值 `1` 秒。
 - 不引入 NuGet 包、Python、托盘界面、设置窗口或自动更新。
 - 最终只新增 `SapiXiaoai.exe` 一个文件；不得新增运行时配置、日志或模型文件。
 - 小爱窗口必须使用 WinEvent 事件驱动锚定到主显示器工作区右下角，边距 `12` 像素；不得永久定时轮询。
@@ -46,7 +46,7 @@
 
 - [ ] **Step 1: 写失败测试**
 
-创建 `ProgramTests.cs`，测试默认值、有效/无效配置、置信度门槛、单调时钟五秒边界和本机固定离线识别器：
+创建 `ProgramTests.cs`，测试默认值、有效/无效配置、置信度门槛、单调时钟冷却边界和本机固定离线识别器：
 
 ```csharp
 using System;
@@ -384,7 +384,7 @@ Get-NetTCPConnection -OwningProcess $p.Id -ErrorAction SilentlyContinue
 
 先让小爱完全退出，保持新唤醒器运行，对默认麦克风清楚说“你好小爱”。确认小爱界面出现语音波形或聆听倒计时，再立即口述一个可核对的查询。然后保持小爱窗口打开，再说一次“你好小爱”，重复同一检查。
 
-预期：两种起始状态下，小爱都进入聆听并接收紧随其后的查询。仅打开或前置小爱窗口不算通过；五秒内再次说唤醒词不会重复触发。
+预期：两种起始状态下，小爱都进入聆听并接收紧随其后的查询。仅打开或前置小爱窗口不算通过；配置的冷却时间内再次说唤醒词不会重复触发。
 
 - [ ] **Step 5: 验证窗口锚定与空闲资源**
 
