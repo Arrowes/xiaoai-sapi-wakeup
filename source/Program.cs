@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Globalization;
@@ -158,6 +159,208 @@ namespace SapiXiaoai
         }
     }
 
+    internal enum XiaoaiLogAction
+    {
+        None,
+        CancelClose,
+        ScheduleClose
+    }
+
+    internal sealed class XiaoaiClosePolicy
+    {
+        private bool armed;
+        private bool playbackSeen;
+        private bool closePending;
+
+        public XiaoaiLogAction ProcessLine(string line)
+        {
+            if (line.IndexOf("Session start:", StringComparison.Ordinal) >= 0 ||
+                line.IndexOf("-> [Listening]", StringComparison.Ordinal) >= 0)
+            {
+                armed = true;
+                playbackSeen = false;
+                closePending = false;
+                return XiaoaiLogAction.CancelClose;
+            }
+            if (!armed) return XiaoaiLogAction.None;
+
+            bool playbackChanged = line.IndexOf("PlaybackStateChanged",
+                StringComparison.Ordinal) >= 0;
+            if ((playbackChanged && (line.IndexOf("->Playing", StringComparison.Ordinal) >= 0 ||
+                    line.IndexOf("-> Playing", StringComparison.Ordinal) >= 0)) ||
+                line.IndexOf("state: Flowing", StringComparison.Ordinal) >= 0)
+            {
+                playbackSeen = true;
+                closePending = false;
+                return XiaoaiLogAction.CancelClose;
+            }
+
+            if (playbackChanged && line.IndexOf("->Paused", StringComparison.Ordinal) >= 0 &&
+                line.IndexOf("BufferFinished: True", StringComparison.Ordinal) >= 0)
+                return ScheduleOnce();
+
+            if (line.IndexOf("Session stop:", StringComparison.Ordinal) >= 0 ||
+                line.IndexOf("-> [Inactive]", StringComparison.Ordinal) >= 0)
+                return playbackSeen ? XiaoaiLogAction.None : ScheduleOnce();
+
+            return XiaoaiLogAction.None;
+        }
+
+        private XiaoaiLogAction ScheduleOnce()
+        {
+            if (closePending) return XiaoaiLogAction.None;
+            closePending = true;
+            return XiaoaiLogAction.ScheduleClose;
+        }
+    }
+
+    internal static class XiaoaiAutoCloser
+    {
+        private const int CloseDelayMilliseconds = 1000;
+        private const int MonitoringTimeoutMilliseconds = 120000;
+        private static readonly object sync = new object();
+        private static int generation;
+        private static FileSystemWatcher watcher;
+        private static Dictionary<string, long> offsets;
+        private static XiaoaiClosePolicy policy;
+        private static System.Threading.Timer closeTimer;
+        private static System.Threading.Timer timeoutTimer;
+        private static string logDirectory;
+        private static int targetWindowGeneration;
+
+        public static void Arm(int windowGeneration)
+        {
+            lock (sync)
+            {
+                StopLocked();
+                int armedGeneration = ++generation;
+                targetWindowGeneration = windowGeneration;
+                logDirectory = Path.Combine(Environment.GetFolderPath(
+                    Environment.SpecialFolder.LocalApplicationData), "Packages",
+                    "8497DDF3.639A2791C9AB_kf545nqv09rxe", "LocalState");
+                if (!Directory.Exists(logDirectory)) return;
+
+                try
+                {
+                    offsets = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+                    foreach (string path in Directory.GetFiles(logDirectory, "Xiaoai_*.txt"))
+                        offsets[path] = new FileInfo(path).Length;
+                    policy = new XiaoaiClosePolicy();
+                    watcher = new FileSystemWatcher(logDirectory, "Xiaoai_*.txt");
+                    watcher.NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite |
+                        NotifyFilters.Size;
+                    FileSystemEventHandler changed = delegate { QueueRead(armedGeneration); };
+                    watcher.Changed += changed;
+                    watcher.Created += changed;
+                    watcher.EnableRaisingEvents = true;
+                    timeoutTimer = new System.Threading.Timer(delegate { Stop(armedGeneration); }, null,
+                        MonitoringTimeoutMilliseconds, Timeout.Infinite);
+                    QueueRead(armedGeneration);
+                }
+                catch (IOException) { StopLocked(); }
+                catch (UnauthorizedAccessException) { StopLocked(); }
+            }
+        }
+
+        public static void Cancel()
+        {
+            lock (sync)
+            {
+                ++generation;
+                StopLocked();
+            }
+        }
+
+        private static void QueueRead(int armedGeneration)
+        {
+            ThreadPool.QueueUserWorkItem(delegate { ReadNewLines(armedGeneration); });
+        }
+
+        private static void ReadNewLines(int armedGeneration)
+        {
+            lock (sync)
+            {
+                if (armedGeneration != generation || watcher == null) return;
+                string[] paths;
+                try { paths = Directory.GetFiles(logDirectory, "Xiaoai_*.txt"); }
+                catch (IOException) { return; }
+                catch (UnauthorizedAccessException) { return; }
+
+                foreach (string path in paths)
+                {
+                    try
+                    {
+                        long offset;
+                        if (!offsets.TryGetValue(path, out offset)) offset = 0;
+                        using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+                            FileShare.ReadWrite | FileShare.Delete))
+                        {
+                            if (offset > stream.Length) offset = 0;
+                            stream.Position = offset;
+                            using (StreamReader reader = new StreamReader(stream, Encoding.UTF8, true))
+                            {
+                                string appended = reader.ReadToEnd();
+                                offsets[path] = stream.Position;
+                                foreach (string line in appended.Split(new[] { "\r\n", "\n" },
+                                    StringSplitOptions.RemoveEmptyEntries))
+                                    Apply(policy.ProcessLine(line), armedGeneration);
+                            }
+                        }
+                    }
+                    catch (IOException) { }
+                    catch (UnauthorizedAccessException) { }
+                }
+            }
+        }
+
+        private static void Apply(XiaoaiLogAction action, int armedGeneration)
+        {
+            if (action == XiaoaiLogAction.None) return;
+            if (closeTimer != null) closeTimer.Dispose();
+            closeTimer = null;
+            if (action == XiaoaiLogAction.ScheduleClose)
+                closeTimer = new System.Threading.Timer(delegate { Close(armedGeneration); }, null,
+                    CloseDelayMilliseconds, Timeout.Infinite);
+        }
+
+        private static void Close(int armedGeneration)
+        {
+            int windowGeneration;
+            lock (sync)
+            {
+                if (armedGeneration != generation) return;
+                windowGeneration = targetWindowGeneration;
+                ++generation;
+                StopLocked();
+            }
+            WindowAnchor.CloseAttachedWindow(windowGeneration);
+        }
+
+        private static void Stop(int armedGeneration)
+        {
+            lock (sync)
+            {
+                if (armedGeneration != generation) return;
+                ++generation;
+                StopLocked();
+            }
+        }
+
+        private static void StopLocked()
+        {
+            if (watcher != null) watcher.Dispose();
+            if (closeTimer != null) closeTimer.Dispose();
+            if (timeoutTimer != null) timeoutTimer.Dispose();
+            watcher = null;
+            closeTimer = null;
+            timeoutTimer = null;
+            offsets = null;
+            policy = null;
+            logDirectory = null;
+            targetWindowGeneration = 0;
+        }
+    }
+
     internal sealed class WindowAnchorState
     {
         private readonly object sync = new object();
@@ -208,6 +411,28 @@ namespace SapiXiaoai
             }
         }
 
+        public bool TryGetCurrentTarget(out int discoveryGeneration, out IntPtr hwnd,
+            out uint threadId, out uint processId)
+        {
+            lock (sync)
+            {
+                discoveryGeneration = generation;
+                hwnd = targetWindow;
+                threadId = targetThreadId;
+                processId = targetProcessId;
+                return hwnd != IntPtr.Zero && threadId != 0 && processId != 0;
+            }
+        }
+
+        public bool TryGetCurrentTarget(int expectedGeneration, out IntPtr hwnd,
+            out uint threadId, out uint processId)
+        {
+            int currentGeneration;
+            bool found = TryGetCurrentTarget(out currentGeneration, out hwnd,
+                out threadId, out processId);
+            return found && currentGeneration == expectedGeneration;
+        }
+
         public bool TryUseTarget(int discoveryGeneration, IntPtr hwnd,
             uint threadId, uint processId, Func<bool> action)
         {
@@ -245,6 +470,7 @@ namespace SapiXiaoai
         private const uint SwpNoActivate = 0x0010;
         private const uint SwpAsyncWindowPos = 0x4000;
         private const int ObjIdWindow = 0;
+        private const uint WmClose = 0x0010;
         internal const uint ForeignMoveFlags =
             SwpNoSize | SwpNoZOrder | SwpNoActivate | SwpAsyncWindowPos;
         private static readonly WinEventDelegate callback = OnWindowEvent;
@@ -271,6 +497,9 @@ namespace SapiXiaoai
         private static extern bool SetWindowPos(IntPtr hwnd, IntPtr insertAfter,
             int x, int y, int cx, int cy, uint flags);
         [DllImport("user32.dll")]
+        private static extern bool PostMessage(IntPtr hwnd, uint message,
+            IntPtr wParam, IntPtr lParam);
+        [DllImport("user32.dll")]
         private static extern IntPtr SetWinEventHook(uint eventMin, uint eventMax,
             IntPtr module, WinEventDelegate callback, uint processId, uint threadId, uint flags);
         [DllImport("user32.dll")]
@@ -295,10 +524,28 @@ namespace SapiXiaoai
             };
         }
 
-        public static void AttachWhenAvailable()
+        public static int AttachWhenAvailable()
         {
             int generation = state.BeginDiscovery();
             ThreadPool.QueueUserWorkItem(delegate(object ignored) { Discover(generation); });
+            return generation;
+        }
+
+        public static bool CloseAttachedWindow(int expectedGeneration)
+        {
+            IntPtr hwnd;
+            uint threadId;
+            uint processId;
+            if (!state.TryGetCurrentTarget(expectedGeneration, out hwnd,
+                out threadId, out processId))
+                return false;
+            return state.TryUseTarget(expectedGeneration, hwnd, threadId, processId, delegate
+            {
+                uint currentProcessId;
+                return GetWindowThreadProcessId(hwnd, out currentProcessId) == threadId &&
+                    currentProcessId == processId && IsExpectedWindow(hwnd) &&
+                    PostMessage(hwnd, WmClose, IntPtr.Zero, IntPtr.Zero);
+            });
         }
 
         private static void Discover(int generation)
@@ -418,6 +665,7 @@ namespace SapiXiaoai
                 engine.SpeechRecognized += OnSpeechRecognized;
                 engine.RecognizeCompleted += OnRecognizeCompleted;
                 WindowAnchor.Start();
+                Application.ApplicationExit += delegate { XiaoaiAutoCloser.Cancel(); };
                 engine.RecognizeAsync(RecognizeMode.Multiple);
                 try { Application.Run(); }
                 finally { completionPolicy.BeginShutdown(); }
@@ -447,14 +695,16 @@ namespace SapiXiaoai
                 Stopwatch.Frequency, settings)) return;
             try
             {
+                int windowGeneration = WindowAnchor.AttachWhenAvailable();
+                XiaoaiAutoCloser.Arm(windowGeneration);
                 ProcessLauncher.StartAndDispose(delegate
                 {
                     return Process.Start(new ProcessStartInfo(helperPath) { UseShellExecute = true });
                 });
-                WindowAnchor.AttachWhenAvailable();
             }
             catch (Exception ex)
             {
+                XiaoaiAutoCloser.Cancel();
                 errorNotifier.PostLaunchFailure("无法启动小爱同学：" + ex.Message);
             }
         }

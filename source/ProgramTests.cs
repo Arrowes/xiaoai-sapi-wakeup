@@ -197,6 +197,48 @@ internal static class ProgramTests
         }) && coordinatedState.TryUseTarget(newerGeneration, new IntPtr(40), 440, 4040,
             delegate { return true; }),
             "failed old action preserves newer target");
+
+        XiaoaiClosePolicy silentSession = new XiaoaiClosePolicy();
+        Check(silentSession.ProcessLine("PlaybackStateChanged, Playing ->Paused, BufferFinished: True") ==
+            XiaoaiLogAction.None, "old log lines cannot close XiaoAI");
+        Check(silentSession.ProcessLine("DialogManager: Session start: test") ==
+            XiaoaiLogAction.CancelClose, "new XiaoAI session cancels an older close");
+        Check(silentSession.ProcessLine("DialogManager, CurrentCard: NULL, Session stop: test") ==
+            XiaoaiLogAction.ScheduleClose, "session without a command schedules close");
+
+        XiaoaiClosePolicy spokenSession = new XiaoaiClosePolicy();
+        spokenSession.ProcessLine("DialogManager: Session start: test");
+        Check(spokenSession.ProcessLine("PlaybackStateChanged, Buffering ->Playing") ==
+            XiaoaiLogAction.CancelClose, "answer playback cancels early close");
+        Check(spokenSession.ProcessLine("DialogManager, Session stop: test") ==
+            XiaoaiLogAction.None, "session stop does not interrupt an answer");
+        Check(spokenSession.ProcessLine("PlaybackStateChanged, Playing ->Paused, BufferFinished: False") ==
+            XiaoaiLogAction.None, "unfinished playback does not close XiaoAI");
+        Check(spokenSession.ProcessLine("PlaybackStateChanged, Playing ->Paused, BufferFinished: True") ==
+            XiaoaiLogAction.ScheduleClose, "finished answer schedules close");
+
+        XiaoaiClosePolicy lateAnswer = new XiaoaiClosePolicy();
+        lateAnswer.ProcessLine("Changing agent state: [Inactive] -> [Listening]");
+        Check(lateAnswer.ProcessLine("Changing agent state: [Working] -> [Inactive]") ==
+            XiaoaiLogAction.ScheduleClose, "inactive session schedules close");
+        Check(lateAnswer.ProcessLine("MediaPlayerDialogAudioOutputAdapter-PlaybackStateChanged, Buffering ->Playing") ==
+            XiaoaiLogAction.CancelClose, "late playback cancels pending close");
+        Check(lateAnswer.ProcessLine("MediaPlayerDialogAudioOutputAdapter-PlaybackStateChanged, Playing ->Paused, BufferFinished: True") ==
+            XiaoaiLogAction.ScheduleClose, "late answer closes only after playback finishes");
+
+        int currentGeneration;
+        IntPtr currentWindow;
+        uint currentThread;
+        uint currentProcess;
+        Check(coordinatedState.TryGetCurrentTarget(out currentGeneration, out currentWindow,
+            out currentThread, out currentProcess) && currentGeneration == newerGeneration &&
+            currentWindow == new IntPtr(40) && currentThread == 440 && currentProcess == 4040,
+            "current attached window can be closed with its validated identity");
+        Check(!coordinatedState.TryGetCurrentTarget(oldGeneration, out currentWindow,
+            out currentThread, out currentProcess) &&
+            coordinatedState.TryGetCurrentTarget(newerGeneration, out currentWindow,
+                out currentThread, out currentProcess),
+            "old interaction cannot close a newer XiaoAI window");
         return 0;
     }
 }
