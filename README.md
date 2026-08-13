@@ -1,11 +1,19 @@
 # SAPI 小爱离线唤醒器
 
-一个精简的 Windows 常驻程序：使用系统自带的简体中文 SAPI 识别固定短语“你好小爱”，再调用原项目 `xiaoai.exe` 让微软商店版小爱同学进入聆听状态。
+使用 Windows 中文 SAPI 离线识别“你好小爱”，自动让 PC 版小爱同学进入聆听状态。
 
-设计目标：无云端 API、无 AccessKey、无第三方运行时，空闲资源占用和文件数量尽可能小。
+## 使用
 
-可直接运行的全部文件位于 `dist/SapiXiaoai/`。保持其中三个文件同目录，运行 `SapiXiaoai.exe` 即可；`set.ini` 只保存本地识别灵敏度，不含旧在线 API 密钥。
+打开 `dist/SapiXiaoai/SapiXiaoai.exe`。运行文件夹必须同时保留 `xiaoai.exe` 和 `set.ini`。
 
-`set.ini` 中的 `cooldown_seconds` 控制两次有效唤醒的最短间隔，默认值为 `1` 秒。
+```ini
+[settings]
+sensitivities = 0.75
+cooldown_seconds = 1
+```
 
-详细设计与实施步骤见 `docs/superpowers/`。
+源码和测试位于 `source/`，可运行文件位于 `dist/SapiXiaoai/`。
+
+## 来源
+
+`xiaoai.exe` 参考 [chnzzy/OneClickXiaoai](https://github.com/chnzzy/OneClickXiaoai)，上游采用 GPL-3.0 许可证，副本见 `LICENSE-OneClickXiaoai.txt`。

@@ -8,7 +8,7 @@
 
 **Tech Stack:** C#、.NET Framework 4.x、`System.Speech`、`System.Windows.Forms`、Windows SAPI 8.0 `zh-CN`
 
-> **最终实现说明（2026-08-13）：** 本文保留下方最初的 TDD 步骤作为实施记录；其中嵌入的早期代码片段不是最终实现参考。经过完整评审和修复的权威实现是 [`src/Program.cs`](../../../src/Program.cs)，对应回归测试是 [`tests/ProgramTests.cs`](../../../tests/ProgramTests.cs)。最终版本固定选择 `MS-2052-80-DESK`，使用 `Stopwatch` 单调时间执行默认一秒、可配置的冷却，通过隐藏 WinForms dispatcher 异步报告启动/识别错误，并使用 DPI 感知、异步发现、generation + HWND/thread/process/title/class 身份校验和异步原生移动来锚定窗口。
+> **最终实现说明（2026-08-13）：** 本文保留下方最初的 TDD 步骤作为实施记录；其中嵌入的早期代码片段不是最终实现参考。经过完整评审和修复的权威实现是 [`source/Program.cs`](../../../source/Program.cs)，对应回归测试是 [`source/ProgramTests.cs`](../../../source/ProgramTests.cs)。最终版本固定选择 `MS-2052-80-DESK`，使用 `Stopwatch` 单调时间执行默认一秒、可配置的冷却，通过隐藏 WinForms dispatcher 异步报告启动/识别错误，并使用 DPI 感知、异步发现、generation + HWND/thread/process/title/class 身份校验和异步原生移动来锚定窗口。
 
 ## Global Constraints
 
@@ -25,8 +25,8 @@
 
 ## File Map
 
-- `src/Program.cs`：配置、冷却门、单实例、SAPI 监听、小爱启动和窗口锚定逻辑。
-- `tests/ProgramTests.cs`：零依赖测试入口。
+- `source/Program.cs`：配置、冷却门、单实例、SAPI 监听、小爱启动和窗口锚定逻辑。
+- `source/ProgramTests.cs`：零依赖测试入口。
 - `outputs/SapiXiaoai.exe`：最终隐藏窗口可执行文件。
 - `E:\各种素材\小米\VoiceXiaoai\SapiXiaoai.exe`：部署副本。
 - `E:\各种素材\小米\VoiceXiaoai\set.ini`：复用既有配置，只把 `sensitivities` 调整为 `0.75`，保留其他键。
@@ -36,8 +36,8 @@
 ### Task 1: 可测试的配置和触发门
 
 **Files:**
-- Create: `src/Program.cs`
-- Create: `tests/ProgramTests.cs`
+- Create: `source/Program.cs`
+- Create: `source/ProgramTests.cs`
 
 **Interfaces:**
 - Produces: `AppSettings.Load(string path) -> AppSettings`
@@ -97,7 +97,7 @@ internal static class ProgramTests
 运行：
 
 ```powershell
-& 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe' /nologo /target:exe /out:build\SapiXiaoai.Tests.exe /reference:'C:\Windows\assembly\GAC_MSIL\System.Speech\3.0.0.0__31bf3856ad364e35\System.Speech.dll' src\Program.cs tests\ProgramTests.cs
+& 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe' /nologo /target:exe /out:build\SapiXiaoai.Tests.exe /reference:'C:\Windows\assembly\GAC_MSIL\System.Speech\3.0.0.0__31bf3856ad364e35\System.Speech.dll' source\Program.cs source\ProgramTests.cs
 ```
 
 预期：编译失败，提示 `AppSettings`、`TriggerGate` 和 `RecognizerSupport` 尚未定义。
@@ -182,7 +182,7 @@ namespace SapiXiaoai
 ### Task 2: 后台 SAPI 监听程序
 
 **Files:**
-- Modify: `src/Program.cs`
+- Modify: `source/Program.cs`
 
 **Interfaces:**
 - Consumes: `AppSettings.Load`、`TriggerGate.TryEnter`、`RecognizerSupport.GetRequiredRecognizer`
@@ -241,14 +241,14 @@ public static RecognizerInfo GetRequiredRecognizer()
 - `RecognizeCompleted` 的意外 `Error` 或 `InputStreamEnded` 通过同一个 dispatcher 显示一次错误并退出消息泵；正常关停取消不重复报告。
 - 用隐藏的 `Application.Run()` 消息循环保持后台进程存活，为后续 WinEvent 回调提供消息泵。
 
-最终主循环不再内嵌复制在计划中；请直接使用 [`src/Program.cs`](../../../src/Program.cs) 的评审版本。它让隐藏 `Control` 与 `SpeechRecognitionEngine` 一起包围 `Application.Run()` 的完整生命周期，先创建 dispatcher handle，再订阅 `SpeechRecognized`/`RecognizeCompleted`。所有 SAPI 回调只做门控、进程启动或 `BeginInvoke` 投递；对话框和 `Application.ExitThread` 只在主 STA 消息泵执行。
+最终主循环不再内嵌复制在计划中；请直接使用 [`source/Program.cs`](../../../source/Program.cs) 的评审版本。它让隐藏 `Control` 与 `SpeechRecognitionEngine` 一起包围 `Application.Run()` 的完整生命周期，先创建 dispatcher handle，再订阅 `SpeechRecognized`/`RecognizeCompleted`。所有 SAPI 回调只做门控、进程启动或 `BeginInvoke` 投递；对话框和 `Application.ExitThread` 只在主 STA 消息泵执行。
 
 - [ ] **Step 4: 运行全部核心测试**
 
 使用以下命令重新编译测试入口，并运行测试 EXE：
 
 ```powershell
-& 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe' /nologo /target:exe /define:TEST /out:build\SapiXiaoai.Tests.exe /reference:'C:\Windows\assembly\GAC_MSIL\System.Speech\3.0.0.0__31bf3856ad364e35\System.Speech.dll' /reference:System.Windows.Forms.dll /reference:System.Drawing.dll src\Program.cs tests\ProgramTests.cs
+& 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe' /nologo /target:exe /define:TEST /out:build\SapiXiaoai.Tests.exe /reference:'C:\Windows\assembly\GAC_MSIL\System.Speech\3.0.0.0__31bf3856ad364e35\System.Speech.dll' /reference:System.Windows.Forms.dll /reference:System.Drawing.dll source\Program.cs source\ProgramTests.cs
 & '.\build\SapiXiaoai.Tests.exe'
 ```
 
@@ -259,7 +259,7 @@ public static RecognizerInfo GetRequiredRecognizer()
 运行：
 
 ```powershell
-& 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe' /nologo /optimize+ /target:winexe /out:build\SapiXiaoai.exe /reference:'C:\Windows\assembly\GAC_MSIL\System.Speech\3.0.0.0__31bf3856ad364e35\System.Speech.dll' /reference:System.Windows.Forms.dll /reference:System.Drawing.dll src\Program.cs
+& 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe' /nologo /optimize+ /target:winexe /out:build\SapiXiaoai.exe /reference:'C:\Windows\assembly\GAC_MSIL\System.Speech\3.0.0.0__31bf3856ad364e35\System.Speech.dll' /reference:System.Windows.Forms.dll /reference:System.Drawing.dll source\Program.cs
 ```
 
 预期：生成 `build\SapiXiaoai.exe`，无编译错误。
@@ -267,8 +267,8 @@ public static RecognizerInfo GetRequiredRecognizer()
 ### Task 3: 低资源窗口锚定
 
 **Files:**
-- Modify: `src/Program.cs`
-- Modify: `tests/ProgramTests.cs`
+- Modify: `source/Program.cs`
+- Modify: `source/ProgramTests.cs`
 
 **Interfaces:**
 - Produces: `WindowAnchor.CalculatePosition(Rectangle workArea, Size windowSize) -> Point`
@@ -297,7 +297,7 @@ Check(clamped == new Point(100, 50), "oversized window clamped");
 
 - [ ] **Step 3: 实现坐标计算和原生事件锚定**
 
-最初的同步/raw-HWND 示例已删除，因为它在 `SpeechRecognized` 回调中执行 50 × 100 ms 等待，并可能把过期或复用的 HWND 当作当前目标。最终实现直接见 [`src/Program.cs`](../../../src/Program.cs)，其锚定路径为：
+最初的同步/raw-HWND 示例已删除，因为它在 `SpeechRecognized` 回调中执行 50 × 100 ms 等待，并可能把过期或复用的 HWND 当作当前目标。最终实现直接见 [`source/Program.cs`](../../../source/Program.cs)，其锚定路径为：
 
 - 在创建任何屏幕/UI 状态之前启用进程 DPI 感知，所有 `12` 像素计算均使用物理坐标。
 - 每次真实唤醒只创建一个 generation，并把最长五秒的发现工作提交给 ThreadPool；回调立即返回，空闲时没有轮询线程或 `Timer`。
