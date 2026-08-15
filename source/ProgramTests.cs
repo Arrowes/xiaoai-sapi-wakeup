@@ -56,6 +56,17 @@ internal static class ProgramTests
         Check(Math.Abs(fallback.Confidence - 0.75f) < 0.001f, "invalid confidence fallback");
         Check(Math.Abs(fallback.CooldownSeconds - 1f) < 0.001f, "invalid cooldown fallback");
 
+        string fakeWindows = Path.Combine(root, "Windows");
+        string fakeMedia = Path.Combine(fakeWindows, "Media");
+        Directory.CreateDirectory(fakeMedia);
+        string fakeSpeechOn = Path.Combine(fakeMedia, "Speech On.wav");
+        if (File.Exists(fakeSpeechOn)) File.Delete(fakeSpeechOn);
+        Check(WakeSound.FindCustomSound(fakeWindows) == null,
+            "missing custom wake sound uses Windows fallback");
+        File.WriteAllBytes(fakeSpeechOn, new byte[0]);
+        Check(WakeSound.FindCustomSound(fakeWindows) == fakeSpeechOn,
+            "localized speech-on sound resolves to its real file name");
+
         TriggerGate gate = new TriggerGate();
         const long frequency = 1000;
         const long start = 123456;
@@ -73,23 +84,13 @@ internal static class ProgramTests
             "configured cooldown exact boundary accepted");
 
         RecognitionCompletionPolicy normalCompletion = new RecognitionCompletionPolicy();
-        Check(!normalCompletion.TryBeginUnexpectedFailure(null, false),
-            "normal recognition completion ignored");
-
-        RecognitionCompletionPolicy errorCompletion = new RecognitionCompletionPolicy();
-        Check(errorCompletion.TryBeginUnexpectedFailure(new InvalidOperationException("boom"), false),
-            "recognition error begins shutdown");
-        Check(!errorCompletion.TryBeginUnexpectedFailure(null, true),
-            "recognition failure reports only once");
-
-        RecognitionCompletionPolicy endedCompletion = new RecognitionCompletionPolicy();
-        Check(endedCompletion.TryBeginUnexpectedFailure(null, true),
-            "ended recognition input begins shutdown");
+        Check(normalCompletion.ShouldRestart(),
+            "unexpected normal completion restarts recognition");
 
         RecognitionCompletionPolicy shutdownCompletion = new RecognitionCompletionPolicy();
         shutdownCompletion.BeginShutdown();
-        Check(!shutdownCompletion.TryBeginUnexpectedFailure(new InvalidOperationException("cancelled"), true),
-            "shutdown completion does not report");
+        Check(!shutdownCompletion.ShouldRestart(),
+            "shutdown completion does not restart recognition");
 
         Queue<Action> uiQueue = new Queue<Action>();
         List<string> shownErrors = new List<string>();

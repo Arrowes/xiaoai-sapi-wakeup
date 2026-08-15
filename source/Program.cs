@@ -61,10 +61,9 @@ namespace SapiXiaoai
     {
         private int shutdownStarted;
 
-        public bool TryBeginUnexpectedFailure(Exception error, bool inputStreamEnded)
+        public bool ShouldRestart()
         {
-            return (error != null || inputStreamEnded) &&
-                Interlocked.CompareExchange(ref shutdownStarted, 1, 0) == 0;
+            return Volatile.Read(ref shutdownStarted) == 0;
         }
 
         public void BeginShutdown()
@@ -144,6 +143,38 @@ namespace SapiXiaoai
         public static void StartAndDispose(Func<Process> start)
         {
             using (Process process = start()) { }
+        }
+    }
+
+    internal static class WakeSound
+    {
+        public static string FindCustomSound(string windowsDirectory)
+        {
+            string path = Path.Combine(windowsDirectory, "Media", "Speech On.wav");
+            return File.Exists(path) ? path : null;
+        }
+
+        public static void PlayAfterDelay()
+        {
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                Thread.Sleep(1300);
+                string path = FindCustomSound(Environment.GetFolderPath(
+                    Environment.SpecialFolder.Windows));
+                if (path != null)
+                {
+                    try
+                    {
+                        using (System.Media.SoundPlayer player = new System.Media.SoundPlayer(path))
+                            player.PlaySync();
+                        return;
+                    }
+                    catch (IOException) { }
+                    catch (InvalidOperationException) { }
+                    catch (TimeoutException) { }
+                }
+                System.Media.SystemSounds.Beep.Play();
+            });
         }
     }
 
@@ -623,6 +654,9 @@ namespace SapiXiaoai
         private static string helperPath;
         private static RecognitionCompletionPolicy completionPolicy;
         private static AsyncErrorNotifier errorNotifier;
+        private static System.Threading.Timer recognitionRetryTimer;
+
+        private const int RecognitionRetryMilliseconds = 5000;
 
         [STAThread]
         private static void Main()
@@ -671,14 +705,23 @@ namespace SapiXiaoai
                 GrammarBuilder builder = new GrammarBuilder("你好小爱");
                 builder.Culture = info.Culture;
                 engine.LoadGrammar(new Grammar(builder));
-                engine.SetInputToDefaultAudioDevice();
                 engine.SpeechRecognized += OnSpeechRecognized;
                 engine.RecognizeCompleted += OnRecognizeCompleted;
-                WindowAnchor.Start();
-                Application.ApplicationExit += delegate { XiaoaiAutoCloser.Cancel(); };
-                engine.RecognizeAsync(RecognizeMode.Multiple);
-                try { Application.Run(); }
-                finally { completionPolicy.BeginShutdown(); }
+                using (System.Threading.Timer retryTimer = new System.Threading.Timer(
+                    TryRestartRecognition, engine, Timeout.Infinite, Timeout.Infinite))
+                {
+                    recognitionRetryTimer = retryTimer;
+                    WindowAnchor.Start();
+                    Application.ApplicationExit += delegate { XiaoaiAutoCloser.Cancel(); };
+                    ScheduleRecognitionRestart(0);
+                    try { Application.Run(); }
+                    finally
+                    {
+                        completionPolicy.BeginShutdown();
+                        retryTimer.Change(Timeout.Infinite, Timeout.Infinite);
+                    }
+                }
+                recognitionRetryTimer = null;
             }
         }
 
@@ -692,11 +735,33 @@ namespace SapiXiaoai
 
         private static void OnRecognizeCompleted(object sender, RecognizeCompletedEventArgs e)
         {
-            if (!completionPolicy.TryBeginUnexpectedFailure(e.Error, e.InputStreamEnded)) return;
-            string message = e.Error != null
-                ? "语音识别意外停止：" + e.Error.Message
-                : "语音识别输入已结束，请检查默认麦克风。";
-            errorNotifier.PostFatalFailure(message);
+            ScheduleRecognitionRestart(RecognitionRetryMilliseconds);
+        }
+
+        private static void TryRestartRecognition(object state)
+        {
+            if (!completionPolicy.ShouldRestart()) return;
+            try
+            {
+                SpeechRecognitionEngine engine = (SpeechRecognitionEngine)state;
+                engine.SetInputToDefaultAudioDevice();
+                engine.RecognizeAsync(RecognizeMode.Multiple);
+            }
+            catch (InvalidOperationException)
+            {
+                ScheduleRecognitionRestart(RecognitionRetryMilliseconds);
+            }
+            catch (COMException)
+            {
+                ScheduleRecognitionRestart(RecognitionRetryMilliseconds);
+            }
+        }
+
+        private static void ScheduleRecognitionRestart(int delayMilliseconds)
+        {
+            if (!completionPolicy.ShouldRestart() || recognitionRetryTimer == null) return;
+            try { recognitionRetryTimer.Change(delayMilliseconds, Timeout.Infinite); }
+            catch (ObjectDisposedException) { }
         }
 
         private static void OnSpeechRecognized(object sender, SpeechRecognizedEventArgs e)
@@ -711,7 +776,7 @@ namespace SapiXiaoai
                 {
                     return Process.Start(new ProcessStartInfo(helperPath) { UseShellExecute = true });
                 });
-                System.Media.SystemSounds.Beep.Play();
+                WakeSound.PlayAfterDelay();
             }
             catch (Exception ex)
             {
