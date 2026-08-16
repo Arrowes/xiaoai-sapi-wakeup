@@ -655,6 +655,7 @@ namespace SapiXiaoai
         private static RecognitionCompletionPolicy completionPolicy;
         private static AsyncErrorNotifier errorNotifier;
         private static System.Threading.Timer recognitionRetryTimer;
+        private static Action requestProcessRestart;
 
         private const int RecognitionRetryMilliseconds = 5000;
 
@@ -662,22 +663,30 @@ namespace SapiXiaoai
         private static void Main()
         {
             bool created;
+            bool restart = false;
             using (Mutex mutex = new Mutex(true, @"Local\SapiXiaoai.SingleInstance", out created))
             {
                 if (!created) return;
                 try
                 {
                     DpiAwareness.Enable();
-                    RunListener();
+                    restart = RunListener();
                 }
                 catch (Exception ex)
                 {
                     MessageBox.Show(ex.Message, "SAPI 小爱唤醒器", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
+            if (!restart) return;
+            Thread.Sleep(2000);
+            ProcessLauncher.StartAndDispose(delegate
+            {
+                return Process.Start(new ProcessStartInfo(Application.ExecutablePath)
+                    { UseShellExecute = true });
+            });
         }
 
-        private static void RunListener()
+        private static bool RunListener()
         {
             string basePath = AppDomain.CurrentDomain.BaseDirectory;
             helperPath = Path.Combine(basePath, "xiaoai.exe");
@@ -690,10 +699,30 @@ namespace SapiXiaoai
             settings = AppSettings.Load(Path.Combine(basePath, "set.ini"));
             gate = new TriggerGate();
             completionPolicy = new RecognitionCompletionPolicy();
+            int restartRequested = 0;
             using (Control dispatcher = new Control())
             using (SpeechRecognitionEngine engine = new SpeechRecognitionEngine(info))
             {
                 dispatcher.CreateControl();
+                Action requestRestart = delegate
+                {
+                    if (restartRequested != 0) return;
+                    restartRequested = 1;
+                    Application.ExitThread();
+                };
+                requestProcessRestart = delegate { TryPost(dispatcher, requestRestart); };
+                Microsoft.Win32.PowerModeChangedEventHandler powerHandler = delegate(object sender,
+                    Microsoft.Win32.PowerModeChangedEventArgs e)
+                {
+                    if (e.Mode == Microsoft.Win32.PowerModes.Resume)
+                        TryPost(dispatcher, requestRestart);
+                };
+                Microsoft.Win32.SessionSwitchEventHandler sessionHandler = delegate(object sender,
+                    Microsoft.Win32.SessionSwitchEventArgs e)
+                {
+                    if (e.Reason == Microsoft.Win32.SessionSwitchReason.SessionUnlock)
+                        TryPost(dispatcher, requestRestart);
+                };
                 errorNotifier = new AsyncErrorNotifier(
                     delegate(Action action) { return TryPost(dispatcher, action); },
                     delegate(string message)
@@ -713,16 +742,22 @@ namespace SapiXiaoai
                     recognitionRetryTimer = retryTimer;
                     WindowAnchor.Start();
                     Application.ApplicationExit += delegate { XiaoaiAutoCloser.Cancel(); };
+                    Microsoft.Win32.SystemEvents.PowerModeChanged += powerHandler;
+                    Microsoft.Win32.SystemEvents.SessionSwitch += sessionHandler;
                     ScheduleRecognitionRestart(0);
                     try { Application.Run(); }
                     finally
                     {
+                        requestProcessRestart = null;
+                        Microsoft.Win32.SystemEvents.PowerModeChanged -= powerHandler;
+                        Microsoft.Win32.SystemEvents.SessionSwitch -= sessionHandler;
                         completionPolicy.BeginShutdown();
                         retryTimer.Change(Timeout.Infinite, Timeout.Infinite);
                     }
                 }
                 recognitionRetryTimer = null;
             }
+            return restartRequested != 0;
         }
 
         private static bool TryPost(Control dispatcher, Action action)
@@ -735,7 +770,8 @@ namespace SapiXiaoai
 
         private static void OnRecognizeCompleted(object sender, RecognizeCompletedEventArgs e)
         {
-            ScheduleRecognitionRestart(RecognitionRetryMilliseconds);
+            Action restart = requestProcessRestart;
+            if (restart != null) restart();
         }
 
         private static void TryRestartRecognition(object state)
